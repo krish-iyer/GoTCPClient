@@ -84,19 +84,19 @@ type TCPHdr struct {
 }
 
 type SendVars struct {
-	UnAck      bool
-	Next       bool
-	Window     bool
-	UrgentPtr  bool
+	UnAck      uint32
+	Next       uint32
+	Window     uint16
+	UrgentPtr  uint16
 	LastSeqNum uint32
 	LastAckNum uint32
 	InitSeqNum uint32
 }
 
 type RecvVars struct {
-	Next       bool
-	Window     bool
-	UrgentPtr  bool
+	Next       uint32
+	Window     uint16
+	UrgentPtr  uint16
 	InitSeqNum uint32
 }
 
