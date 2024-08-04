@@ -81,6 +81,7 @@ type TCPHdr struct {
 	Checksum  uint16 // Kernel will set this if it's 0
 	UrgentPtr uint16
 	Options   []TCPOption // size(Options) == (DOffset-5)*32; present only when DOffset > 5
+	Length    uint16
 }
 
 type SendVars struct {
@@ -112,7 +113,114 @@ type TCPConn struct {
 	Fd         int
 	LocalAddr  syscall.SockaddrInet4
 	RemoteAddr syscall.SockaddrInet4
+	LocalPort  uint16
+	RemotePort uint16
 	Hdr        TCPHdr
+	SendVars   SendVars
+	RecvVars   RecvVars
+}
+
+const logLevel = DEBUG
+
+const (
+	OFF  = -1
+	WARN = iota
+	ERROR
+	INFO
+	DEBUG
+)
+
+const (
+	KNRM = "\x1B[0m"
+	KRED = "\x1B[31m"
+	KGRN = "\x1B[32m"
+	KYEL = "\x1B[33m"
+	KBLU = "\x1B[34m"
+	KMAG = "\x1B[35m"
+	KCYN = "\x1B[36m"
+	KWHT = "\x1B[37m"
+
+	BRED = "\x1B[1;31m"
+	BGRN = "\x1B[1;32m"
+	BYEL = "\x1B[1;33m"
+	BBLU = "\x1B[1;34m"
+	BMAG = "\x1B[1;35m"
+	BCYN = "\x1B[1;36m"
+	BWHT = "\x1B[1;37m"
+
+	IREDBG = "\x1B[0;91m"
+	IGRNBG = "\x1B[0;92m"
+	IYELBG = "\x1B[0;93m"
+	IBLUBG = "\x1B[0;94m"
+	IMAGBG = "\x1B[0;95m"
+	ICYNBG = "\x1B[0;96m"
+	IWHTBG = "\x1B[0;97m"
+)
+
+func flagsIntToStr(value uint8) string {
+	flags := ""
+
+	if value&FIN != 0 {
+		flags += "FIN, "
+	}
+	if value&SYN != 0 {
+		flags += "SYN, "
+	}
+	if value&RST != 0 {
+		flags += "RST, "
+	}
+	if value&PSH != 0 {
+		flags += "PSH, "
+	}
+	if value&ACK != 0 {
+		flags += "ACK, "
+	}
+	if value&URG != 0 {
+		flags += "URG, "
+	}
+	if value&ECE != 0 {
+		flags += "ECE, "
+	}
+	if value&CWR != 0 {
+		flags += "CWR, "
+	}
+
+	// Trim any trailing ", "
+	return flags[:len(flags)-2]
+}
+
+func log(level int, packet TCPHdr, format string, a ...interface{}) {
+
+	var logLevelString string
+	var msgColor string
+	switch level {
+	case WARN:
+		msgColor = KYEL
+		logLevelString = fmt.Sprintf("%-6s[WARN] ", msgColor)
+	case ERROR:
+		msgColor = KRED
+		logLevelString = fmt.Sprintf("%s[ERROR] ", msgColor)
+	case DEBUG:
+		msgColor = KGRN
+		logLevelString = fmt.Sprintf("%s[DEBUG] ", msgColor)
+	default:
+		msgColor = KWHT
+		logLevelString = fmt.Sprintf("%-6s[INFO] ", msgColor)
+
+	}
+	if level <= logLevel {
+		// [PORT -> PORT] [FLAGS] [Seq, Ack, Win, Len] [Status]
+		debugString := fmt.Sprintf("%s[%v] %sCONN[%v -> %v] %sFLAGS[%-8v] %s[Seq=%-10v, Ack=%-10v, Win=%-6v, Len=%-4v] .......... %s",
+			msgColor, time.Now().UnixMilli(),
+			IYELBG, packet.Src, packet.Dst,
+			IGRNBG, flagsIntToStr(packet.Flags),
+			KWHT, packet.SeqNum, packet.AckNum, packet.Window, packet.Length, msgColor)
+		debugString2 := fmt.Sprintf(format+"\n", a...)
+		debug := logLevelString + debugString + debugString2
+		_, _ = fmt.Printf(debug)
+	}
+	return
+
 }
 
 func IPStrtoBytes(ip string) ([4]byte, error) {
