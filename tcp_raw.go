@@ -130,7 +130,7 @@ func IPStrtoBytes(ip string) ([4]byte, error) {
 	return resizeIP, err
 }
 
-func Checksum(data []byte) uint16 {
+func checksum(data []byte) uint16 {
 	sum := uint32(0)
 	for i := 0; i < len(data)-1; i += 2 {
 		sum += uint32(data[i])<<8 | uint32(data[i+1])
@@ -253,7 +253,7 @@ func (conn *TCPConn) initHandShake() error {
 	serPseudoHdr := serializePseudoIPHdr(conn.LocalAddr.Addr, conn.RemoteAddr.Addr, syscall.IPPROTO_TCP, uint16(len(serTCPPack)))
 
 	// update checksum
-	binary.BigEndian.PutUint16(serTCPPack[16:18], Checksum(append(serPseudoHdr, serTCPPack...)))
+	binary.BigEndian.PutUint16(serTCPPack[16:18], checksum(append(serPseudoHdr, serTCPPack...)))
 
 	err = conn.sendRaw(serTCPPack)
 	if err != nil {
