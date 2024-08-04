@@ -317,7 +317,7 @@ func deserializeTCPPack(buff []byte) TCPHdr {
 
 	// Parse options if data offset > 5
 	if packet.Offset > 5 {
-		optionsLength := (int(packet.Offset) * 4) - 20
+		optionsLength := (int(packet.Offset-5) << 2)
 		optionsData := buff[20 : 20+optionsLength]
 		for i := 0; i < optionsLength; {
 			kind := optionsData[i]
