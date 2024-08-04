@@ -142,7 +142,7 @@ func Checksum(data []byte) uint16 {
 	return uint16(^sum)
 }
 
-func (conn *TCPConn) GenerateInitSeqNum() uint32 {
+func (conn *TCPConn) generateInitSeqNum() uint32 {
 	//rand.Seed((time.Now().UnixMicro() % 4))
 	var ipSum uint32
 	ipSum = 0
@@ -153,7 +153,7 @@ func (conn *TCPConn) GenerateInitSeqNum() uint32 {
 	return uint32(rand.Int31n(int32(ipSum)) + int32(time.Now().UnixMicro()%4))
 }
 
-func SerializeTCPPack(packet TCPHdr) []byte {
+func serializeTCPPack(packet TCPHdr) []byte {
 	buff := make([]byte, 20)
 
 	binary.BigEndian.PutUint16(buff[0:2], packet.Src)
@@ -184,7 +184,7 @@ func SerializeTCPPack(packet TCPHdr) []byte {
 	return buff
 }
 
-func DeserializeTCPPack(buff []byte) TCPHdr {
+func deserializeTCPPack(buff []byte) TCPHdr {
 	var packet TCPHdr
 
 	packet.Src = binary.BigEndian.Uint16(buff[0:2])
@@ -224,7 +224,7 @@ func DeserializeTCPPack(buff []byte) TCPHdr {
 	return packet
 }
 
-func SerializePseudoIPHdr(srcIP [4]byte, dstIP [4]byte, ptcl uint8, length uint16) []byte {
+func serializePseudoIPHdr(srcIP [4]byte, dstIP [4]byte, ptcl uint8, length uint16) []byte {
 	buff := make([]byte, 12)
 
 	copy(buff[0:4], srcIP[:])
@@ -235,13 +235,13 @@ func SerializePseudoIPHdr(srcIP [4]byte, dstIP [4]byte, ptcl uint8, length uint1
 	return buff
 }
 
-func (conn *TCPConn) InitHandShake() error {
+func (conn *TCPConn) initHandShake() error {
 	var err error
 	var packetHdr TCPHdr
 
 	packetHdr.Src = conn.Hdr.Src
 	packetHdr.Dst = conn.Hdr.Dst
-	packetHdr.SeqNum = conn.GenerateInitSeqNum()
+	packetHdr.SeqNum = conn.generateInitSeqNum()
 	packetHdr.AckNum = 0
 	packetHdr.Offset = 5
 	packetHdr.Flags = SYN
@@ -249,21 +249,21 @@ func (conn *TCPConn) InitHandShake() error {
 	packetHdr.Checksum = 0
 	packetHdr.UrgentPtr = 0
 
-	serTCPPack := SerializeTCPPack(packetHdr)
-	serPseudoHdr := SerializePseudoIPHdr(conn.LocalAddr.Addr, conn.RemoteAddr.Addr, syscall.IPPROTO_TCP, uint16(len(serTCPPack)))
+	serTCPPack := serializeTCPPack(packetHdr)
+	serPseudoHdr := serializePseudoIPHdr(conn.LocalAddr.Addr, conn.RemoteAddr.Addr, syscall.IPPROTO_TCP, uint16(len(serTCPPack)))
 
 	// update checksum
 	binary.BigEndian.PutUint16(serTCPPack[16:18], Checksum(append(serPseudoHdr, serTCPPack...)))
 
-	err = conn.Send(serTCPPack)
+	err = conn.sendRaw(serTCPPack)
 	if err != nil {
 		fmt.Println("Error sending packet:", err)
 		return err
 	}
 
-	buff := make([]byte, 4096)
+	buff := make([]byte, 1024)
 	recvLen := int(0)
-	buff, recvLen, err = conn.Recv()
+	buff, recvLen, err = conn.recvRaw(1024)
 
 	if err != nil {
 		fmt.Println("Error receiving packet:", err)
@@ -271,7 +271,7 @@ func (conn *TCPConn) InitHandShake() error {
 	}
 
 	if recvLen > 0 {
-		deserPack := DeserializeTCPPack(buff)
+		deserPack := deserializeTCPPack(buff)
 		fmt.Println("recv back:%v", deserPack)
 	} else {
 		fmt.Println("Received empty buffer")
@@ -329,15 +329,16 @@ func (conn *TCPConn) Open(localIPStr string, localPort uint16, remoteIPStr strin
 	conn.Hdr.Dst = remotePort
 
 	// TODO: call threeway handshare
-	err = conn.InitHandShake()
+	err = conn.initHandShake()
 	return err
 }
 
 func (conn *TCPConn) Close() error {
+
 	return syscall.Close(conn.Fd)
 }
 
-func (conn *TCPConn) Send(data []byte) error {
+func (conn *TCPConn) sendRaw(data []byte) error {
 	err := syscall.Sendto(conn.Fd, data, 0, &conn.RemoteAddr)
 	if err != nil {
 		fmt.Println("Error sending packet:", err)
@@ -345,8 +346,8 @@ func (conn *TCPConn) Send(data []byte) error {
 	return err
 }
 
-func (conn *TCPConn) Recv() ([]byte, int, error) {
-	buff := make([]byte, 4096)
+func (conn *TCPConn) recvRaw(size int) ([]byte, int, error) {
+	buff := make([]byte, size)
 	var err error
 	var recvLen int
 	var sockAddr syscall.Sockaddr
@@ -385,5 +386,4 @@ func main() {
 	if err != nil {
 		fmt.Println("Failed to close connection:", err)
 	}
-
 }
