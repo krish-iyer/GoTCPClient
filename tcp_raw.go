@@ -30,10 +30,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"net"
-	// "strconv"
-	// "errors"
 	"math/rand"
+	"net"
 	"syscall"
 	"time"
 )
@@ -272,7 +270,6 @@ func checksum(data []byte) uint16 {
 }
 
 func (conn *TCPConn) generateInitSeqNum() uint32 {
-	//rand.Seed((time.Now().UnixMicro() % 4))
 	var ipSum uint32
 	ipSum = 0
 	for i := 0; i < 4; i++ {
