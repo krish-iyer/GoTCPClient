@@ -32,7 +32,7 @@ import (
 	"fmt"
 	"net"
 	// "strconv"
-	"errors"
+	// "errors"
 	"math/rand"
 	"syscall"
 	"time"
@@ -66,6 +66,11 @@ const (
 	ECE = 64
 	CWR = 128
 )
+
+type TCPError struct {
+	Code    int
+	Message string
+}
 
 type TCPOption struct {
 	Kind   uint8
@@ -226,7 +231,17 @@ func log(level int, packet TCPHdr, format string, a ...interface{}) {
 		_, _ = fmt.Printf(debug)
 	}
 	return
+}
 
+func (err *TCPError) Error() string {
+	return fmt.Sprintf("%s[Err code: %d] -> Message: %s", KRED, err.Code, err.Message)
+}
+
+func NewTCPError(code int, message string) error {
+	return &TCPError{
+		Code:    code,
+		Message: message,
+	}
 }
 
 func IPStrtoBytes(ip string) ([4]byte, error) {
@@ -238,7 +253,7 @@ func IPStrtoBytes(ip string) ([4]byte, error) {
 		copy(resizeIP[:], ipBytes)
 		err = nil
 	} else {
-		err = errors.New("Invalid IPv4 Address")
+		err = NewTCPError(103, "Invalid IPv4 Address")
 	}
 
 	return resizeIP, err
@@ -573,10 +588,10 @@ func (conn *TCPConn) recvSeg(size int) (SegVars, error) {
 				UrgentPtr: deserPack.UrgentPtr,
 			}
 		} else {
-			err = errors.New("Ports doesn't match")
+			err = NewTCPError(101, "Ports doesn't match")
 		}
 	} else {
-		err = errors.New("Received empty buffer")
+		err = NewTCPError(102, "Received empty buffer")
 		fmt.Println("Received empty buffer")
 	}
 
