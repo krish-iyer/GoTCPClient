@@ -103,6 +103,7 @@ type RecvVars struct {
 	Window     uint16
 	UrgentPtr  uint16
 	InitSeqNum uint32
+	MSS        uint16
 }
 
 type SegVars struct {
@@ -554,6 +555,15 @@ func (conn *TCPConn) recvSeg(size int) (SegVars, error) {
 		deserPack := deserializeTCPPack(buff)
 		log(DEBUG, deserPack, "Received packet")
 		if (deserPack.Dst == conn.LocalPort) && (deserPack.Src == conn.RemotePort) {
+			if validateFlags(deserPack.Flags, SYN) {
+				for _, option := range deserPack.Options {
+					if option.Kind == 2 {
+						conn.RecvVars.MSS = binary.BigEndian.Uint16(option.Data[0:2])
+						log(DEBUG, deserPack, "Setting MSS: %v", conn.RecvVars.MSS)
+					}
+				}
+			}
+
 			seg = SegVars{
 				SeqNum:    deserPack.SeqNum,
 				AckNum:    deserPack.AckNum,
