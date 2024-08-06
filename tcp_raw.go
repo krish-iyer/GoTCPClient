@@ -232,10 +232,11 @@ func log(level int, packet TCPHdr, format string, a ...interface{}) {
 }
 
 func (err *TCPError) Error() string {
-	return fmt.Sprintf("%s[Err code: %d] -> Message: %s", KRED, err.Code, err.Message)
+	return fmt.Sprintf("%s[Error code: %d] -> Message: %s", KRED, err.Code, err.Message)
 }
 
-func NewTCPError(code int, message string) error {
+func NewTCPError(code int, message string, a ...interface{}) error {
+	message = fmt.Sprintf(message, a...)
 	return &TCPError{
 		Code:    code,
 		Message: message,
@@ -243,18 +244,17 @@ func NewTCPError(code int, message string) error {
 }
 
 func IPStrtoBytes(ip string) ([4]byte, error) {
-	var err error
+	var tcpErr error
 	ipBytes := net.ParseIP(ip).To4()
 	var resizeIP [4]byte
 
 	if ipBytes != nil {
 		copy(resizeIP[:], ipBytes)
-		err = nil
 	} else {
-		err = NewTCPError(103, "Invalid IPv4 Address")
+		tcpErr = NewTCPError(100, "Invalid IPv4 Address")
 	}
 
-	return resizeIP, err
+	return resizeIP, tcpErr
 }
 
 func checksum(data []byte) uint16 {
@@ -463,15 +463,15 @@ func (conn *TCPConn) Open(localIPStr string, localPort uint16, remoteIPStr strin
 	localAddrBytes, err := IPStrtoBytes(localIPStr)
 
 	if err != nil {
-		fmt.Println("Local IP Format Error:", err)
-		return err
+		tcpErr = NewTCPError(101, "Local IP format error\n%v", err)
+		return tcpErr
 	}
 
 	remoteAddrBytes, err := IPStrtoBytes(remoteIPStr)
 
 	if err != nil {
-		fmt.Println("Remote IP Format Error:", err)
-		return err
+		tcpErr = NewTCPError(102, "Remote IP format error\n%v", err)
+		return tcpErr
 	}
 
 	localAddrInt := syscall.SockaddrInet4{
@@ -484,10 +484,17 @@ func (conn *TCPConn) Open(localIPStr string, localPort uint16, remoteIPStr strin
 		Port: int(remotePort),
 	}
 
+	fd, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_TCP)
+
+	if err != nil {
+		tcpErr = NewTCPError(103, "Failed to create socket\n%v", err)
+		return tcpErr
+	}
+
 	err = syscall.Bind(fd, &localAddrInt)
 	if err != nil {
-		fmt.Printf("Error binding local address to socket:", err)
-		return err
+		tcpErr = NewTCPError(103, "Error binding local address to socket\n%v", err)
+		return tcpErr
 	}
 
 	conn.Fd = fd
@@ -498,13 +505,21 @@ func (conn *TCPConn) Open(localIPStr string, localPort uint16, remoteIPStr strin
 
 	// TODO: call threeway handshare
 	err = conn.initHandShake()
-	return err
+
+	if err != nil {
+		tcpErr = NewTCPError(103, "TCP Handshake Failed\n%v", err)
+		return tcpErr
+	}
+
+	return tcpErr
 }
 
 func (conn *TCPConn) Close() error {
 	err := conn.sendFin()
-	if err != err {
-		fmt.Println("Failed to send FIN")
+	var tcpErr error
+	if err != nil {
+		tcpErr = NewTCPError(900, "Failed to send FIN\n%v", err)
+		return tcpErr
 	}
 
 	var seg SegVars
@@ -516,10 +531,23 @@ func (conn *TCPConn) Close() error {
 		if ret {
 			// send ACK
 			err = conn.sendAck()
+			if err != nil {
+				tcpErr = NewTCPError(901, "Failed to send ACK after receiving FINACK while closing\n%v", err)
+				return tcpErr
+			}
+
 		}
+	} else {
+		tcpErr = NewTCPError(902, "Failed to recv FINACK after sending FIN\n%v", err)
+		return tcpErr
 	}
 
-	return syscall.Close(conn.Fd)
+	err = syscall.Close(conn.Fd)
+	if err != nil {
+		tcpErr = NewTCPError(903, "Failed to close connection\n%v", err)
+		return tcpErr
+	}
+	return tcpErr
 }
 
 func (conn *TCPConn) sendSeg(packet TCPHdr) error {
@@ -555,13 +583,14 @@ func (conn *TCPConn) sendRaw(data []byte) error {
 
 func (conn *TCPConn) recvSeg(size int) (SegVars, error) {
 	var err error
+	var tcpErr error
 	var seg SegVars
 	buff := make([]byte, size)
 	recvLen := int(0)
 	buff, recvLen, err = conn.recvRaw(1024)
 	if err != nil {
-		fmt.Println("Error receiving packet:", err)
-		return seg, err
+		tcpErr = NewTCPError(350, "Error receiving segment\n%v", err)
+		return seg, tcpErr
 	}
 	if recvLen > 0 {
 		deserPack := deserializeTCPPack(buff)
@@ -585,14 +614,13 @@ func (conn *TCPConn) recvSeg(size int) (SegVars, error) {
 				UrgentPtr: deserPack.UrgentPtr,
 			}
 		} else {
-			err = NewTCPError(101, "Ports doesn't match")
+			tcpErr = NewTCPError(351, "Ports doesn't match")
 		}
 	} else {
-		err = NewTCPError(102, "Received empty buffer")
-		fmt.Println("Received empty buffer")
+		tcpErr = NewTCPError(352, "Received empty buffer")
 	}
 
-	return seg, err
+	return seg, tcpErr
 }
 
 // process ack
@@ -623,23 +651,24 @@ func validateFlags(reg uint8, flags uint8) bool {
 func (conn *TCPConn) recvRaw(size int) ([]byte, int, error) {
 	buff := make([]byte, size)
 	var err error
+	var tcpErr error
 	var recvLen int
 	var sockAddr syscall.Sockaddr
 	for {
 		recvLen, sockAddr, err = syscall.Recvfrom(conn.Fd, buff, 0)
 		sockAddrInet4, _ := sockAddr.(*syscall.SockaddrInet4)
-		if err == nil {
-			if bytes.Equal(sockAddrInet4.Addr[:], conn.RemoteAddr.Addr[:]) {
-				// remove IP header
-				return buff[IPV4HDRLEN:], (recvLen - IPV4HDRLEN), err
-			} else {
-				continue
-			}
-		} else {
+		if err != nil {
+			tcpErr = NewTCPError(300, "Error in recv packet\n%v", err)
 			break
 		}
+		if bytes.Equal(sockAddrInet4.Addr[:], conn.RemoteAddr.Addr[:]) {
+			// remove IP header
+			return buff[IPV4HDRLEN:], (recvLen - IPV4HDRLEN), tcpErr
+		} else {
+			continue
+		}
 	}
-	return buff, 0, err
+	return buff, 0, tcpErr
 }
 
 // func (conn *TCPConn) Abort() {
@@ -652,12 +681,15 @@ func main() {
 
 	var conn TCPConn
 	err := conn.Open("10.68.186.2", 8080, "10.72.138.186", 50000)
+	var tcpErr error
 	if err != nil {
-		fmt.Println("Error opening connection:", err)
+		tcpErr = NewTCPError(0, "Error opening connection\n%v", err)
+		fmt.Println(tcpErr)
 		return
 	}
 	err = conn.Close()
 	if err != nil {
-		fmt.Println("Failed to close connection:", err)
+		tcpErr = NewTCPError(1, "Error closing connection\n%v", err)
+		fmt.Println(tcpErr)
 	}
 }
