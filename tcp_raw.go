@@ -26,6 +26,11 @@ package main
           Note that one tick mark represents one bit position.
 */
 
+/*
+   TODO: Handle ACKs seperately from other command and filter them for eg if ACK is sent before FINACK
+   TODO: Append requests with ACK if server replied something i.e is theres'a pending ACK
+*/
+
 import (
 	"bytes"
 	"encoding/binary"
@@ -37,32 +42,60 @@ import (
 )
 
 const (
-	LISTEN    = 1
-	SYNSENT   = 2
-	SYNRECV   = 3
-	ESTB      = 4
-	FINWAIT1  = 5
-	FINWAIT2  = 6
-	CLOSEWAIT = 7
-	CLOSING   = 8
-	LASTACK   = 9
-	TIMEWAIT  = 10
-	CLOSED    = 11
+	IDLE = iota
+	LISTEN
+	CONNECT
+	SYNSENT
+	SYNRECV
+	ESTABLISHED
+	FINWAIT1
+	FINWAIT2
+	CLOSE
+	CLOSEWAIT
+	CLOSING
+	LASTACK
+	TIMEWAIT
+	CLOSED
 )
+
+var stateToStr = map[uint8]string{
+	IDLE:        "IDLE",
+	LISTEN:      "LISTEN",
+	CONNECT:     "CONNECT",
+	SYNSENT:     "SYNSENT",
+	SYNRECV:     "SYNRECV",
+	ESTABLISHED: "ESTABLISHED",
+	FINWAIT1:    "FINWAIT1",
+	FINWAIT2:    "FINWAIT2",
+	CLOSE:       "CLOSE",
+	CLOSEWAIT:   "CLOSEWAIT",
+	CLOSING:     "CLOSING",
+	LASTACK:     "LASTACK",
+	TIMEWAIT:    "TIMEWAIT",
+	CLOSED:      "CLOSED",
+}
+
+// Convert an integer constant to its string representation
+func stateIntToStr(state uint8) string {
+	if str, exists := stateToStr[state]; exists {
+		return str
+	}
+	return "UNKNOWN"
+}
 
 const (
 	IPV4HDRLEN = 20
 )
 
 const (
-	FIN = 1
-	SYN = 2
-	RST = 4
-	PSH = 8
-	ACK = 16
-	URG = 32
-	ECE = 64
-	CWR = 128
+	FIN = 1 << iota
+	SYN
+	RST
+	PSH
+	ACK
+	URG
+	ECE
+	CWR
 )
 
 type TCPError struct {
@@ -127,6 +160,7 @@ type TCPConn struct {
 	Hdr        TCPHdr
 	SendVars   SendVars
 	RecvVars   RecvVars
+	State      uint8
 }
 
 const logLevel = DEBUG
@@ -198,7 +232,7 @@ func flagsIntToStr(value uint8) string {
 	return flags[:len(flags)-2]
 }
 
-func log(level int, packet TCPHdr, format string, a ...interface{}) {
+func (conn *TCPConn) log(level int, packet *TCPHdr, format string, a ...interface{}) {
 
 	var logLevelString string
 	var msgColor string
@@ -218,15 +252,27 @@ func log(level int, packet TCPHdr, format string, a ...interface{}) {
 
 	}
 	if level <= logLevel {
-		// [PORT -> PORT] [FLAGS] [Seq, Ack, Win, Len] [Status]
-		debugString := fmt.Sprintf("%s[%v] %sCONN[%v -> %v] %sFLAGS[%-8v] %s[Seq=%-10v, Ack=%-10v, Win=%-6v, Len=%-4v] .......... %s",
-			msgColor, time.Now().UnixMilli(),
-			IYELBG, packet.Src, packet.Dst,
-			IGRNBG, flagsIntToStr(packet.Flags),
-			KWHT, packet.SeqNum, packet.AckNum, packet.Window, packet.Length, msgColor)
-		debugString2 := fmt.Sprintf(format+"\n", a...)
-		debug := logLevelString + debugString + debugString2
-		_, _ = fmt.Printf(debug)
+		if packet != nil {
+			// [PORT -> PORT] [FLAGS] [Seq, Ack, Win, Len] [Status]
+			debugString := fmt.Sprintf("%s[%v] %sSTATE[%-8v] %sCONN[%v -> %v] %sFLAGS[%-8v] %s[Seq=%-10v, Ack=%-10v, Win=%-6v, Len=%-4v] .......... %s",
+				msgColor, time.Now().UnixMilli(),
+				KYEL, stateIntToStr(conn.State),
+				IYELBG, packet.Src, packet.Dst,
+				IGRNBG, flagsIntToStr(packet.Flags),
+				KWHT, packet.SeqNum, packet.AckNum, packet.Window, packet.Length, msgColor)
+			debugString2 := fmt.Sprintf(format+"\n", a...)
+			debug := logLevelString + debugString + debugString2
+			_, _ = fmt.Printf(debug)
+		} else {
+			debugString := fmt.Sprintf("%s[%v] %sSTATE[%-8v] %sCONN[%v -> %v] \t\t\t\t\t\t\t\t\t   %s.......... %s",
+				msgColor, time.Now().UnixMilli(),
+				KYEL, stateIntToStr(conn.State),
+				IYELBG, conn.LocalPort, conn.RemotePort,
+				KWHT, msgColor)
+			debugString2 := fmt.Sprintf(format+"\n", a...)
+			debug := logLevelString + debugString + debugString2
+			_, _ = fmt.Printf(debug)
+		}
 	}
 	return
 }
@@ -255,6 +301,26 @@ func IPStrtoBytes(ip string) ([4]byte, error) {
 	}
 
 	return resizeIP, tcpErr
+}
+
+// validates and returns IP in bytes
+func validateAddrFormat(localIPStr string, remoteIPStr string) ([4]byte, [4]byte, error) {
+	var err, tcpErr error
+	var localAddrBytes, remoteAddrBytes [4]byte
+	localAddrBytes, err = IPStrtoBytes(localIPStr)
+
+	if err != nil {
+		tcpErr = NewTCPError(101, "Local IP format error\n%v", err)
+		return localAddrBytes, remoteAddrBytes, tcpErr
+	}
+
+	remoteAddrBytes, err = IPStrtoBytes(remoteIPStr)
+
+	if err != nil {
+		tcpErr = NewTCPError(102, "Remote IP format error\n%v", err)
+		return localAddrBytes, remoteAddrBytes, tcpErr
+	}
+	return localAddrBytes, remoteAddrBytes, tcpErr
 }
 
 func checksum(data []byte) uint16 {
@@ -364,58 +430,19 @@ func serializePseudoIPHdr(srcIP [4]byte, dstIP [4]byte, ptcl uint8, length uint1
 	return buff
 }
 
-func (conn *TCPConn) initHandShake() error {
-	var err error
+func (conn *TCPConn) sendFlags(flags uint8) error {
 	var packet TCPHdr
 
 	packet.Src = conn.LocalPort
 	packet.Dst = conn.RemotePort
-	packet.SeqNum = conn.generateInitSeqNum()
-	packet.AckNum = 0
-	packet.Offset = 5
-	packet.Flags = SYN
-	packet.Window = 128
-	packet.Checksum = 0
-	packet.UrgentPtr = 0
-	packet.Length = 0
-
-	conn.SendVars.UnAck = packet.SeqNum
-	conn.SendVars.InitSeqNum = packet.SeqNum
-
-	err = conn.sendSeg(packet)
-	if err != nil {
-		fmt.Println("Error sending packet:", err)
-		return err
+	if flags == SYN {
+		packet.SeqNum = conn.generateInitSeqNum()
+	} else {
+		packet.SeqNum = conn.SendVars.Next
 	}
-
-	var seg SegVars
-	seg, err = conn.recvSeg(1024)
-
-	if err != nil {
-		fmt.Println("Error receiving packet:", err)
-		return err
-	}
-
-	if validateFlags(seg.Flags, SYN|ACK) {
-		// send ack
-		ret := conn.validateAndUpdateVars(false, seg)
-		if ret {
-			// send ACK
-			err = conn.sendAck()
-		}
-	}
-	return err
-}
-
-func (conn *TCPConn) sendAck() error {
-	var packet TCPHdr
-
-	packet.Src = conn.LocalPort
-	packet.Dst = conn.RemotePort
-	packet.SeqNum = conn.SendVars.Next
 	packet.AckNum = conn.SendVars.LastAckNum
 	packet.Offset = 5
-	packet.Flags = ACK
+	packet.Flags = flags
 	packet.Window = 128
 	packet.Checksum = 0
 	packet.UrgentPtr = 0
@@ -428,49 +455,131 @@ func (conn *TCPConn) sendAck() error {
 	return err
 }
 
-func (conn *TCPConn) sendFin() error {
-	var packet TCPHdr
+func (conn *TCPConn) recvFlags(flags uint8) error {
+	var err, tcpErr error
+	var seg SegVars
 
-	packet.Src = conn.LocalPort
-	packet.Dst = conn.RemotePort
-	packet.SeqNum = conn.SendVars.Next
-	packet.AckNum = conn.SendVars.LastAckNum
-	packet.Offset = 5
-	packet.Flags = FIN | ACK
-	packet.Window = 128
-	packet.Checksum = 0
-	packet.UrgentPtr = 0
-
-	err := conn.sendSeg(packet)
-	if err != nil {
-		fmt.Println("Error sending FIN", err)
-	}
-	return err
-}
-
-func (conn *TCPConn) Open(localIPStr string, localPort uint16, remoteIPStr string, remotePort uint16) error {
-
-	var fd int
-	var err error
-
-	fd, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_TCP)
+	seg, err = conn.recvSeg(1024)
 
 	if err != nil {
-		fmt.Println("Error creating socket:", err)
-		return err
-	}
-
-	localAddrBytes, err := IPStrtoBytes(localIPStr)
-
-	if err != nil {
-		tcpErr = NewTCPError(101, "Local IP format error\n%v", err)
+		tcpErr = NewTCPError(104, "Error receiving SYN packet\n%v", err)
 		return tcpErr
 	}
 
-	remoteAddrBytes, err := IPStrtoBytes(remoteIPStr)
+	if validateFlags(seg.Flags, flags) {
+		ret := conn.validateAndUpdateVars(false, seg)
+		if !ret {
+			tcpErr = NewTCPError(105, "Error validating SYN ACK packet\n%v", err)
+			return tcpErr
+		}
+	} else {
+		tcpErr = NewTCPError(106, "Error validating flags SYN ACK packet\n%v", err)
+		return tcpErr
+	}
+	return tcpErr
+}
+
+func (conn *TCPConn) stateChange(state uint8) error {
+	var err, tcpErr error
+
+	switch state {
+	case IDLE:
+		// do more like check current state and stuff
+		conn.State = IDLE
+	case CONNECT:
+		if conn.State == IDLE {
+			var fd int
+
+			fd, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_TCP)
+
+			if err != nil {
+				tcpErr = NewTCPError(0, "Failed to create socket\n%v", err)
+				return tcpErr
+			}
+
+			err = syscall.Bind(fd, &conn.LocalAddr)
+			if err != nil {
+				tcpErr = NewTCPError(1, "Error binding local address to socket\n%v", err)
+				return tcpErr
+			}
+
+			conn.Fd = fd
+
+			// init handshake
+			err = conn.sendFlags(SYN)
+			if err != nil {
+				tcpErr = NewTCPError(2, "Failed to send SYN\n%v", err)
+				return tcpErr
+			}
+			conn.State = SYNSENT
+
+			err = conn.recvFlags(SYN | ACK)
+			if err != nil {
+				tcpErr = NewTCPError(3, "Failed to recv SYN\n%v", err)
+				return tcpErr
+			}
+			conn.State = SYNRECV
+
+			err = conn.sendFlags(ACK)
+			if err != nil {
+				tcpErr = NewTCPError(4, "Failed to send ACK after recv SYN\n%v", err)
+				return tcpErr
+			}
+			conn.State = ESTABLISHED
+
+		} else {
+			tcpErr = NewTCPError(5, "Can't change state to CONNECT, current state is not IDLE")
+		}
+	case CLOSE:
+		if conn.State == ESTABLISHED {
+			conn.State = FINWAIT1
+
+			err = conn.sendFlags(FIN | ACK)
+			if err != nil {
+				tcpErr = NewTCPError(6, "Failed to send FIN\n%v", err)
+				return tcpErr
+			}
+			conn.State = FINWAIT2
+
+			err = conn.recvFlags(FIN | ACK)
+			if err != nil {
+				tcpErr = NewTCPError(7, "Failed to recv FIN ACK\n%v", err)
+				return tcpErr
+			}
+			conn.State = TIMEWAIT
+
+			err = conn.sendFlags(ACK)
+			if err != nil {
+				tcpErr = NewTCPError(8, "Failed to send ACK after FIN ACK\n%v", err)
+				return tcpErr
+			}
+
+			err = syscall.Close(conn.Fd)
+			if err != nil {
+				tcpErr = NewTCPError(9, "Failed to close connection\n%v", err)
+				return tcpErr
+			}
+			conn.State = CLOSED
+			conn.log(DEBUG, nil, "Connection Closed")
+
+		} else {
+			tcpErr = NewTCPError(10, "Connection is not EST. before Closing")
+		}
+	}
+	return tcpErr
+}
+
+func (conn *TCPConn) Open(localIPStr string, localPort uint16, remoteIPStr string, remotePort uint16) error {
+	var err, tcpErr error
+
+	var localAddrBytes, remoteAddrBytes [4]byte
+
+	err = conn.stateChange(IDLE)
+
+	localAddrBytes, remoteAddrBytes, err = validateAddrFormat(localIPStr, remoteIPStr)
 
 	if err != nil {
-		tcpErr = NewTCPError(102, "Remote IP format error\n%v", err)
+		tcpErr = NewTCPError(103, "Address validation failed\n%v", err)
 		return tcpErr
 	}
 
@@ -484,30 +593,15 @@ func (conn *TCPConn) Open(localIPStr string, localPort uint16, remoteIPStr strin
 		Port: int(remotePort),
 	}
 
-	fd, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_TCP)
-
-	if err != nil {
-		tcpErr = NewTCPError(103, "Failed to create socket\n%v", err)
-		return tcpErr
-	}
-
-	err = syscall.Bind(fd, &localAddrInt)
-	if err != nil {
-		tcpErr = NewTCPError(103, "Error binding local address to socket\n%v", err)
-		return tcpErr
-	}
-
-	conn.Fd = fd
 	conn.LocalAddr = localAddrInt
 	conn.RemoteAddr = remoteAddrInt
 	conn.LocalPort = localPort
 	conn.RemotePort = remotePort
 
-	// TODO: call threeway handshare
-	err = conn.initHandShake()
-
+	// init CONNECT request
+	err = conn.stateChange(CONNECT)
 	if err != nil {
-		tcpErr = NewTCPError(103, "TCP Handshake Failed\n%v", err)
+		tcpErr = NewTCPError(104, "Error changing state for CONNECT\n%v", err)
 		return tcpErr
 	}
 
@@ -515,37 +609,10 @@ func (conn *TCPConn) Open(localIPStr string, localPort uint16, remoteIPStr strin
 }
 
 func (conn *TCPConn) Close() error {
-	err := conn.sendFin()
-	var tcpErr error
+	var err, tcpErr error
+	err = conn.stateChange(CLOSE)
 	if err != nil {
-		tcpErr = NewTCPError(900, "Failed to send FIN\n%v", err)
-		return tcpErr
-	}
-
-	var seg SegVars
-	seg, err = conn.recvSeg(1024) // FINACK ; TODO: Server might send ACK and then FINACK
-
-	if validateFlags(seg.Flags, FIN|ACK) {
-		// send ack
-		ret := conn.validateAndUpdateVars(false, seg)
-		if ret {
-			// send ACK
-			err = conn.sendAck()
-			if err != nil {
-				tcpErr = NewTCPError(901, "Failed to send ACK after receiving FINACK while closing\n%v", err)
-				return tcpErr
-			}
-
-		}
-	} else {
-		tcpErr = NewTCPError(902, "Failed to recv FINACK after sending FIN\n%v", err)
-		return tcpErr
-	}
-
-	err = syscall.Close(conn.Fd)
-	if err != nil {
-		tcpErr = NewTCPError(903, "Failed to close connection\n%v", err)
-		return tcpErr
+		tcpErr = NewTCPError(900, "Failed in closing the connection\n%v", err)
 	}
 	return tcpErr
 }
@@ -560,10 +627,10 @@ func (conn *TCPConn) sendSeg(packet TCPHdr) error {
 
 	err := conn.sendRaw(serTCPPack)
 	if err != nil {
-		log(ERROR, packet, "Error sending packet:", err)
+		conn.log(ERROR, &packet, "Error sending packet:", err)
 		//fmt.Println("Error sending packet:", err)
 	} else {
-		log(DEBUG, packet, "Sent packet")
+		conn.log(DEBUG, &packet, "Sent packet")
 		if (validateFlags(packet.Flags, SYN)) || (validateFlags(packet.Flags, FIN)) || (validateFlags(packet.Flags, PSH)) {
 			conn.SendVars.Next = packet.SeqNum + uint32((packet.Offset-5)<<2) + 1 // (packet.Offset - 5) + 1
 		} else {
@@ -594,13 +661,13 @@ func (conn *TCPConn) recvSeg(size int) (SegVars, error) {
 	}
 	if recvLen > 0 {
 		deserPack := deserializeTCPPack(buff)
-		log(DEBUG, deserPack, "Received packet")
+		conn.log(DEBUG, &deserPack, "Received packet")
 		if (deserPack.Dst == conn.LocalPort) && (deserPack.Src == conn.RemotePort) {
 			if validateFlags(deserPack.Flags, SYN) {
 				for _, option := range deserPack.Options {
 					if option.Kind == 2 {
 						conn.RecvVars.MSS = binary.BigEndian.Uint16(option.Data[0:2])
-						log(DEBUG, deserPack, "Setting MSS: %v", conn.RecvVars.MSS)
+						conn.log(DEBUG, &deserPack, "Setting MSS: %v", conn.RecvVars.MSS)
 					}
 				}
 			}
