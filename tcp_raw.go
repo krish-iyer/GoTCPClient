@@ -29,6 +29,9 @@ package main
 /*
    TODO: Handle ACKs seperately from other command and filter them for eg if ACK is sent before FINACK
    TODO: Append requests with ACK if server replied something i.e is theres'a pending ACK
+   TODO: In all states except SYN-SENT, all reset (RST) segments are validated by checking their SEQ fields. A reset is valid if its sequence number is in the window. In the SYN-SENT state (a RST received in response to an initial SYN), the RST is acceptable if the ACK field acknowledges the SYN.
+   TODO: Eff.snd.MSS = min(SendMSS+20, MMS_S) - TCPhdrsize - IPoptionsize
+   TODO: The "usable window" is:  U = SND.UNA + SND.WND - SND.NXT
 */
 
 import (
@@ -152,15 +155,16 @@ type SegVars struct {
 }
 
 type TCPConn struct {
-	Fd         int
-	LocalAddr  syscall.SockaddrInet4
-	RemoteAddr syscall.SockaddrInet4
-	LocalPort  uint16
-	RemotePort uint16
-	Hdr        TCPHdr
-	SendVars   SendVars
-	RecvVars   RecvVars
-	State      uint8
+	Fd            int
+	LocalAddr     syscall.SockaddrInet4
+	RemoteAddr    syscall.SockaddrInet4
+	LocalPort     uint16
+	RemotePort    uint16
+	Hdr           TCPHdr
+	SendVars      SendVars
+	RecvVars      RecvVars
+	State         uint8
+	CloseListenCh chan bool
 }
 
 const logLevel = DEBUG
@@ -398,19 +402,16 @@ func deserializeTCPPack(buff []byte) TCPHdr {
 	if packet.Offset > 5 {
 		optionsLength := (int(packet.Offset-5) << 2)
 		optionsData := buff[20 : 20+optionsLength]
-		for i := 0; i < optionsLength; {
-			kind := optionsData[i]
-			if kind == 0 { // End of options list
-				break
-			}
-			length := optionsData[i+1]
+		// for i := 0; i < optionsLength; {
+		kind := optionsData[0]
+		if kind == 2 { // End of options list
+			length := optionsData[1]
 			option := TCPOption{
 				Kind:   kind,
 				Length: length,
-				Data:   optionsData[i+2 : i+int(length)],
+				Data:   optionsData[2:4],
 			}
 			packet.Options = append(packet.Options, option)
-			i += int(length)
 		}
 	}
 
@@ -480,6 +481,67 @@ func (conn *TCPConn) recvFlags(flags uint8) error {
 	return tcpErr
 }
 
+// currently only supports ACK and RST
+func (conn *TCPConn) recvAny() (bool, error) {
+	var err, tcpErr error
+	var seg SegVars
+	isReset := false
+	seg, err = conn.recvSegNonBloc(1024)
+
+	if err != nil {
+		tcpErr = NewTCPError(104, "Error receiving SYN packet\n%v", err)
+		return isReset, tcpErr
+	}
+
+	if validateFlags(seg.Flags, ACK) || validateFlags(seg.Flags, RST) {
+		ret := conn.validateAndUpdateVars(false, seg)
+		if !ret {
+			tcpErr = NewTCPError(105, "Error validating SYN ACK packet\n%v", err)
+			return isReset, tcpErr
+		}
+		if validateFlags(seg.Flags, RST) {
+			isReset = true
+		}
+	} else {
+		tcpErr = NewTCPError(106, "Error validating flags SYN ACK packet\n%v", err)
+		return isReset, tcpErr
+	}
+	return isReset, tcpErr
+}
+
+// for now it only applies for recv acks
+// this is a single instance of recv
+// not other function should exec recv without
+// closing this loop
+func (conn *TCPConn) listen() {
+	var err error
+	var isReset bool
+
+	for {
+		select {
+		case <-conn.CloseListenCh:
+			conn.log(DEBUG, nil, "Exiting listen loop")
+			return
+		default:
+			conn.log(DEBUG, nil, "Listen in default")
+			isReset, _ = conn.recvAny()
+			if err != nil {
+				if tcpErr, ok := err.(*TCPError); ok {
+					if tcpErr.Code == 300 {
+						continue
+					}
+				}
+				conn.log(ERROR, nil, "Error in recv ACK in listen loop\n%v", err)
+				return
+			}
+			if isReset {
+				conn.log(DEBUG, nil, "Reset received from remote connection")
+				return
+			}
+		}
+	}
+}
+
 func (conn *TCPConn) stateChange(state uint8) error {
 	var err, tcpErr error
 
@@ -506,6 +568,11 @@ func (conn *TCPConn) stateChange(state uint8) error {
 
 			conn.Fd = fd
 
+			conn.CloseListenCh = make(chan bool)
+			// setting recv timeout
+			tv := syscall.NsecToTimeval(1 * 1e6) // 1ms
+			syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
+
 			// init handshake
 			err = conn.sendFlags(SYN)
 			if err != nil {
@@ -530,11 +597,16 @@ func (conn *TCPConn) stateChange(state uint8) error {
 			conn.RecvVars.MSS = 536
 			conn.State = ESTABLISHED
 			conn.log(DEBUG, nil, "Connection is established")
+
+			go conn.listen()
+
 		} else {
 			tcpErr = NewTCPError(5, "Can't change state to CONNECT, current state is not IDLE")
 		}
 	case CLOSE:
 		if conn.State == ESTABLISHED {
+			conn.log(DEBUG, nil, "Sent Connection close req")
+			conn.CloseListenCh <- true
 			conn.State = FINWAIT1
 
 			err = conn.sendFlags(FIN | ACK)
@@ -652,20 +724,77 @@ func (conn *TCPConn) sendRaw(data []byte) error {
 }
 
 func (conn *TCPConn) recvSeg(size int) (SegVars, error) {
-	var err error
-	var tcpErr error
+	var err, tcpErr error
 	var seg SegVars
 	buff := make([]byte, size)
 	recvLen := int(0)
+
+	for {
+		buff, recvLen, err = conn.recvRaw(1024)
+		if err != nil {
+			if tcpErr, ok := err.(*TCPError); ok {
+				if tcpErr.Code == 300 {
+					continue
+				}
+			}
+			tcpErr = NewTCPError(350, "Error receiving segment\n%v", err)
+			break
+		}
+
+		if recvLen > 0 {
+			deserPack := deserializeTCPPack(buff)
+			// filter
+			if (deserPack.Dst == conn.LocalPort) && (deserPack.Src == conn.RemotePort) {
+				conn.log(DEBUG, &deserPack, "Received packet length:%v", recvLen)
+				if validateFlags(deserPack.Flags, SYN) {
+					for _, option := range deserPack.Options {
+						if option.Kind == 2 {
+							conn.RecvVars.MSS = binary.BigEndian.Uint16(option.Data[0:2])
+							conn.log(DEBUG, &deserPack, "Setting MSS: %v", conn.RecvVars.MSS)
+						}
+					}
+				}
+
+				seg = SegVars{
+					SeqNum:    deserPack.SeqNum,
+					AckNum:    deserPack.AckNum,
+					Length:    uint16(recvLen) - uint16((deserPack.Offset << 2)), // TODO: fix this
+					Window:    deserPack.Window,
+					Flags:     deserPack.Flags,
+					UrgentPtr: deserPack.UrgentPtr,
+				}
+				return seg, tcpErr
+			}
+		} else {
+			tcpErr = NewTCPError(352, "Received empty buffer")
+			break
+		}
+	}
+	return seg, tcpErr
+}
+
+func (conn *TCPConn) recvSegNonBloc(size int) (SegVars, error) {
+	var err, tcpErr error
+	var seg SegVars
+	buff := make([]byte, size)
+	recvLen := int(0)
+
 	buff, recvLen, err = conn.recvRaw(1024)
 	if err != nil {
+		if tcpErr, ok := err.(*TCPError); ok {
+			if tcpErr.Code == 300 {
+				return seg, tcpErr
+			}
+		}
 		tcpErr = NewTCPError(350, "Error receiving segment\n%v", err)
 		return seg, tcpErr
 	}
+
 	if recvLen > 0 {
 		deserPack := deserializeTCPPack(buff)
-		conn.log(DEBUG, &deserPack, "Received packet")
+		// filter
 		if (deserPack.Dst == conn.LocalPort) && (deserPack.Src == conn.RemotePort) {
+			conn.log(DEBUG, &deserPack, "Received packet length:%v", recvLen)
 			if validateFlags(deserPack.Flags, SYN) {
 				for _, option := range deserPack.Options {
 					if option.Kind == 2 {
@@ -683,13 +812,11 @@ func (conn *TCPConn) recvSeg(size int) (SegVars, error) {
 				Flags:     deserPack.Flags,
 				UrgentPtr: deserPack.UrgentPtr,
 			}
-		} else {
-			tcpErr = NewTCPError(351, "Ports doesn't match")
+			return seg, tcpErr
 		}
 	} else {
 		tcpErr = NewTCPError(352, "Received empty buffer")
 	}
-
 	return seg, tcpErr
 }
 
@@ -705,6 +832,7 @@ func (conn *TCPConn) validateAndUpdateVars(recv bool, seg SegVars) bool {
 			}
 			// for now ; not sure about this though
 			conn.SendVars.UnAck = seg.AckNum
+			conn.RecvVars.Window = seg.Window
 			return true
 		}
 	}
@@ -724,20 +852,23 @@ func (conn *TCPConn) recvRaw(size int) ([]byte, int, error) {
 	var tcpErr error
 	var recvLen int
 	var sockAddr syscall.Sockaddr
-	for {
-		recvLen, sockAddr, err = syscall.Recvfrom(conn.Fd, buff, 0)
-		sockAddrInet4, _ := sockAddr.(*syscall.SockaddrInet4)
-		if err != nil {
-			tcpErr = NewTCPError(300, "Error in recv packet\n%v", err)
-			break
-		}
-		if bytes.Equal(sockAddrInet4.Addr[:], conn.RemoteAddr.Addr[:]) {
-			// remove IP header
-			return buff[IPV4HDRLEN:], (recvLen - IPV4HDRLEN), tcpErr
+
+	recvLen, sockAddr, err = syscall.Recvfrom(conn.Fd, buff, 0)
+	sockAddrInet4, _ := sockAddr.(*syscall.SockaddrInet4)
+	if err != nil {
+		if err == syscall.EAGAIN {
+			// Non-blocking timeout reached, loop again
+			tcpErr = NewTCPError(300, "Recv Timout\n%v", err)
 		} else {
-			continue
+			tcpErr = NewTCPError(301, "Error in recv packet\n%v", err)
 		}
+		return buff, 0, tcpErr
 	}
+	if bytes.Equal(sockAddrInet4.Addr[:], conn.RemoteAddr.Addr[:]) {
+		// remove IP header
+		return buff[IPV4HDRLEN:], (recvLen - IPV4HDRLEN), tcpErr
+	}
+
 	return buff, 0, tcpErr
 }
 
