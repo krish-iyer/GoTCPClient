@@ -27,7 +27,6 @@ package main
 */
 
 /*
-   TODO: Handle ACKs seperately from other command and filter them for eg if ACK is sent before FINACK
    TODO: Append requests with ACK if server replied something i.e is theres'a pending ACK
    TODO: In all states except SYN-SENT, all reset (RST) segments are validated by checking their SEQ fields. A reset is valid if its sequence number is in the window. In the SYN-SENT state (a RST received in response to an initial SYN), the RST is acceptable if the ACK field acknowledges the SYN.
    TODO: Eff.snd.MSS = min(SendMSS+20, MMS_S) - TCPhdrsize - IPoptionsize
@@ -481,6 +480,35 @@ func (conn *TCPConn) recvFlags(flags uint8) error {
 	return tcpErr
 }
 
+func (conn *TCPConn) recvFinAck() error {
+	var err, tcpErr error
+	var seg SegVars
+	for {
+		seg, err = conn.recvSeg(1024)
+
+		if err != nil {
+			tcpErr = NewTCPError(107, "Error receiving SYN packet\n%v", err)
+			return tcpErr
+		}
+
+		if validateFlags(seg.Flags, ACK) || validateFlags(seg.Flags, FIN|ACK) {
+			ret := conn.validateAndUpdateVars(false, seg)
+			if !ret {
+				conn.log(DEBUG, nil, "UnACK: %v AckNum: %v Next: %v", conn.SendVars.UnAck, seg.AckNum, conn.SendVars.Next)
+				//return tcpErr
+			}
+			if validateFlags(seg.Flags, FIN) {
+				break
+			}
+
+		} else {
+			tcpErr = NewTCPError(109, "Error validating flags SYN ACK packet\n%v", err)
+			return tcpErr
+		}
+	}
+	return tcpErr
+}
+
 // currently only supports ACK and RST
 func (conn *TCPConn) recvAny() (bool, error) {
 	var err, tcpErr error
@@ -489,21 +517,26 @@ func (conn *TCPConn) recvAny() (bool, error) {
 	seg, err = conn.recvSegNonBloc(1024)
 
 	if err != nil {
-		tcpErr = NewTCPError(104, "Error receiving SYN packet\n%v", err)
+		if tcpErr, ok := err.(*TCPError); ok {
+			if tcpErr.Code == 300 {
+				return isReset, tcpErr
+			}
+		}
+		tcpErr = NewTCPError(110, "Error receiving SYN packet\n%v", err)
 		return isReset, tcpErr
 	}
 
 	if validateFlags(seg.Flags, ACK) || validateFlags(seg.Flags, RST) {
 		ret := conn.validateAndUpdateVars(false, seg)
 		if !ret {
-			tcpErr = NewTCPError(105, "Error validating SYN ACK packet\n%v", err)
-			return isReset, tcpErr
+			tcpErr = NewTCPError(111, "Error validating SYN ACK packet\n%v", err)
+			//return isReset, tcpErr
 		}
 		if validateFlags(seg.Flags, RST) {
 			isReset = true
 		}
 	} else {
-		tcpErr = NewTCPError(106, "Error validating flags SYN ACK packet\n%v", err)
+		tcpErr = NewTCPError(112, "Error validating flags SYN ACK packet\n%v", err)
 		return isReset, tcpErr
 	}
 	return isReset, tcpErr
@@ -616,7 +649,7 @@ func (conn *TCPConn) stateChange(state uint8) error {
 			}
 			conn.State = FINWAIT2
 
-			err = conn.recvFlags(FIN | ACK)
+			err = conn.recvFinAck()
 			if err != nil {
 				tcpErr = NewTCPError(7, "Failed to recv FIN ACK\n%v", err)
 				return tcpErr
@@ -824,16 +857,19 @@ func (conn *TCPConn) recvSegNonBloc(size int) (SegVars, error) {
 // recv : ack after send or recv
 func (conn *TCPConn) validateAndUpdateVars(recv bool, seg SegVars) bool {
 	if !recv {
-		if (conn.SendVars.UnAck < seg.AckNum) && (seg.AckNum <= conn.SendVars.Next) {
+		if seg.AckNum <= conn.SendVars.Next {
 			if validateFlags(seg.Flags, SYN) || validateFlags(seg.Flags, FIN) {
 				conn.SendVars.LastAckNum = seg.SeqNum + uint32(seg.Length) + 1
 			} else {
 				conn.SendVars.LastAckNum = seg.SeqNum + uint32(seg.Length)
 			}
 			// for now ; not sure about this though
-			conn.SendVars.UnAck = seg.AckNum
-			conn.RecvVars.Window = seg.Window
-			return true
+			if conn.SendVars.UnAck < seg.AckNum {
+				conn.log(DEBUG, nil, "Updating ->UnACK: %v AckNum: %v Next: %v, Flags: %v", conn.SendVars.UnAck, seg.AckNum, conn.SendVars.Next, seg.Flags)
+				conn.SendVars.UnAck = seg.AckNum
+				conn.RecvVars.Window = seg.Window
+				return true
+			}
 		}
 	}
 	return false
