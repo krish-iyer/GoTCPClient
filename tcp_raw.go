@@ -254,7 +254,7 @@ func (conn *TCPConn) log(level int, packet *TCPHdr, format string, a ...interfac
 	if level <= logLevel {
 		if packet != nil {
 			// [PORT -> PORT] [FLAGS] [Seq, Ack, Win, Len] [Status]
-			debugString := fmt.Sprintf("%s[%v] %sSTATE[%-8v] %sCONN[%v -> %v] %sFLAGS[%-8v] %s[Seq=%-10v, Ack=%-10v, Win=%-6v, Len=%-4v] .......... %s",
+			debugString := fmt.Sprintf("%s[%v] %sSTATE[%-11v] %sCONN[%v -> %v] %sFLAGS[%-8v] %s[Seq=%-10v, Ack=%-10v, Win=%-6v, Len=%-4v] .......... %s",
 				msgColor, time.Now().UnixMilli(),
 				KYEL, stateIntToStr(conn.State),
 				IYELBG, packet.Src, packet.Dst,
@@ -264,7 +264,7 @@ func (conn *TCPConn) log(level int, packet *TCPHdr, format string, a ...interfac
 			debug := logLevelString + debugString + debugString2
 			_, _ = fmt.Printf(debug)
 		} else {
-			debugString := fmt.Sprintf("%s[%v] %sSTATE[%-8v] %sCONN[%v -> %v] \t\t\t\t\t\t\t\t\t   %s.......... %s",
+			debugString := fmt.Sprintf("%s[%v] %sSTATE[%-11v] %sCONN[%v -> %v] \t\t\t\t\t\t\t\t\t      %s.......... %s",
 				msgColor, time.Now().UnixMilli(),
 				KYEL, stateIntToStr(conn.State),
 				IYELBG, conn.LocalPort, conn.RemotePort,
@@ -437,6 +437,7 @@ func (conn *TCPConn) sendFlags(flags uint8) error {
 	packet.Dst = conn.RemotePort
 	if flags == SYN {
 		packet.SeqNum = conn.generateInitSeqNum()
+		conn.SendVars.UnAck = packet.SeqNum
 	} else {
 		packet.SeqNum = conn.SendVars.Next
 	}
@@ -525,8 +526,10 @@ func (conn *TCPConn) stateChange(state uint8) error {
 				tcpErr = NewTCPError(4, "Failed to send ACK after recv SYN\n%v", err)
 				return tcpErr
 			}
+			// default for IPv4
+			conn.RecvVars.MSS = 536
 			conn.State = ESTABLISHED
-
+			conn.log(DEBUG, nil, "Connection is established")
 		} else {
 			tcpErr = NewTCPError(5, "Can't change state to CONNECT, current state is not IDLE")
 		}
@@ -560,10 +563,10 @@ func (conn *TCPConn) stateChange(state uint8) error {
 				return tcpErr
 			}
 			conn.State = CLOSED
-			conn.log(DEBUG, nil, "Connection Closed")
+			conn.log(DEBUG, nil, "Connection closed")
 
 		} else {
-			tcpErr = NewTCPError(10, "Connection is not EST. before Closing")
+			tcpErr = NewTCPError(10, "Connection is not EST. before closing")
 		}
 	}
 	return tcpErr
