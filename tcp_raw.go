@@ -123,7 +123,7 @@ type TCPPack struct {
 	Checksum  uint16 // Kernel will set this if it's 0
 	UrgentPtr uint16
 	Options   []TCPOption // size(Options) == (DOffset-5)*32; present only when DOffset > 5
-	Length    uint16
+	Length    uint32
 	Data      []byte
 }
 
@@ -385,6 +385,8 @@ func serializeTCPPack(packet TCPPack) []byte {
 	}
 
 	if len(packet.Data) > 0 {
+		fmt.Println("Received data to send")
+		//conn.log(DEBUG, nil, "Received data to send")
 		copy(buff[20:], packet.Data)
 	}
 	return buff
@@ -503,8 +505,10 @@ func (conn *TCPConn) sendSeg(packet TCPPack) error {
 		//fmt.Println("Error sending packet:", err)
 	} else {
 		conn.log(DEBUG, &packet, "Sent packet")
-		if (validateFlags(packet.Flags, SYN)) || (validateFlags(packet.Flags, FIN)) || (validateFlags(packet.Flags, PSH)) {
+		if (validateFlags(packet.Flags, SYN)) || (validateFlags(packet.Flags, FIN)) {
 			conn.SendVars.Next = packet.SeqNum + uint32((packet.Offset-5)<<2) + 1 // (packet.Offset - 5) + 1
+		} else if validateFlags(packet.Flags, PSH) {
+			conn.SendVars.Next = packet.SeqNum + uint32((packet.Offset-5)<<2) + packet.Length
 		} else {
 			conn.SendVars.Next = packet.SeqNum
 		}
@@ -735,9 +739,28 @@ func (conn *TCPConn) recvRaw(size int) ([]byte, int, error) {
 // func (conn *TCPConn) Status() {
 // }
 
-// func (conn *TCPConn) Send(data []byte, size uint32) error {
+func (conn *TCPConn) Send(data []byte, size uint32) error {
+	var packet TCPPack
 
-// }
+	packet.Src = conn.LocalPort
+	packet.Dst = conn.RemotePort
+	packet.SeqNum = conn.SendVars.Next
+	packet.AckNum = conn.SendVars.LastAckNum
+	packet.Offset = 5
+	packet.Flags = PSH | ACK
+	packet.Window = 128
+	packet.Checksum = 0
+	packet.UrgentPtr = 0
+	packet.Length = size
+	packet.Data = make([]byte, size)
+	copy(packet.Data[:size], data[:size])
+
+	err := conn.sendSeg(packet)
+	if err != nil {
+		fmt.Println("Error sending data", err)
+	}
+	return err
+}
 
 func (conn *TCPConn) Open(localIPStr string, localPort uint16, remoteIPStr string, remotePort uint16) error {
 	var err, tcpErr error
@@ -925,16 +948,32 @@ func (conn *TCPConn) stateChange(state uint8) error {
 func main() {
 
 	var conn TCPConn
-	err := conn.Open("10.68.186.2", 8080, "10.72.138.186", 50000)
+	err := conn.Open("10.68.186.2", 8080, "10.72.138.186", 60000)
 	var tcpErr error
 	if err != nil {
 		tcpErr = NewTCPError(0, "Error opening connection\n%v", err)
 		fmt.Println(tcpErr)
 		return
 	}
-	err = conn.Close()
+
+	str := "Hello, World! Krishnan"
+	byteArray := []byte(str)
+
+	err = conn.Send(byteArray, uint32(len(byteArray)))
 	if err != nil {
 		tcpErr = NewTCPError(1, "Error closing connection\n%v", err)
+		fmt.Println(tcpErr)
+	}
+
+	err = conn.Send(byteArray, uint32(len(byteArray)))
+	if err != nil {
+		tcpErr = NewTCPError(1, "Error closing connection\n%v", err)
+		fmt.Println(tcpErr)
+	}
+
+	err = conn.Close()
+	if err != nil {
+		tcpErr = NewTCPError(2, "Error closing connection\n%v", err)
 		fmt.Println(tcpErr)
 	}
 }
