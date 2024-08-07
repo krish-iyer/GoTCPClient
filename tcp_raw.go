@@ -111,7 +111,7 @@ type TCPOption struct {
 	Data   []byte
 }
 
-type TCPHdr struct {
+type TCPPack struct {
 	Src       uint16
 	Dst       uint16
 	SeqNum    uint32
@@ -124,6 +124,7 @@ type TCPHdr struct {
 	UrgentPtr uint16
 	Options   []TCPOption // size(Options) == (DOffset-5)*32; present only when DOffset > 5
 	Length    uint16
+	Data      []byte
 }
 
 type SendVars struct {
@@ -159,7 +160,7 @@ type TCPConn struct {
 	RemoteAddr    syscall.SockaddrInet4
 	LocalPort     uint16
 	RemotePort    uint16
-	Hdr           TCPHdr
+	Hdr           TCPPack
 	SendVars      SendVars
 	RecvVars      RecvVars
 	State         uint8
@@ -235,7 +236,7 @@ func flagsIntToStr(value uint8) string {
 	return flags[:len(flags)-2]
 }
 
-func (conn *TCPConn) log(level int, packet *TCPHdr, format string, a ...interface{}) {
+func (conn *TCPConn) log(level int, packet *TCPPack, format string, a ...interface{}) {
 
 	var logLevelString string
 	var msgColor string
@@ -355,7 +356,7 @@ func (conn *TCPConn) generateInitSeqNum() uint32 {
 	return uint32(rand.Int31n(int32(ipSum)) + int32(time.Now().UnixMicro()%4))
 }
 
-func serializeTCPPack(packet TCPHdr) []byte {
+func serializeTCPPack(packet TCPPack) []byte {
 	buff := make([]byte, 20)
 
 	binary.BigEndian.PutUint16(buff[0:2], packet.Src)
@@ -386,8 +387,8 @@ func serializeTCPPack(packet TCPHdr) []byte {
 	return buff
 }
 
-func deserializeTCPPack(buff []byte) TCPHdr {
-	var packet TCPHdr
+func deserializeTCPPack(buff []byte) TCPPack {
+	var packet TCPPack
 
 	packet.Src = binary.BigEndian.Uint16(buff[0:2])
 	packet.Dst = binary.BigEndian.Uint16(buff[2:4])
@@ -460,7 +461,7 @@ func (conn *TCPConn) validateAndUpdateVars(recv bool, seg SegVars) bool {
 }
 
 func (conn *TCPConn) sendFlags(flags uint8) error {
-	var packet TCPHdr
+	var packet TCPPack
 
 	packet.Src = conn.LocalPort
 	packet.Dst = conn.RemotePort
@@ -485,7 +486,7 @@ func (conn *TCPConn) sendFlags(flags uint8) error {
 	return err
 }
 
-func (conn *TCPConn) sendSeg(packet TCPHdr) error {
+func (conn *TCPConn) sendSeg(packet TCPPack) error {
 
 	serTCPPack := serializeTCPPack(packet)
 	serPseudoHdr := serializePseudoIPHdr(conn.LocalAddr.Addr, conn.RemoteAddr.Addr, syscall.IPPROTO_TCP, uint16(len(serTCPPack)))
@@ -729,6 +730,10 @@ func (conn *TCPConn) recvRaw(size int) ([]byte, int, error) {
 // }
 
 // func (conn *TCPConn) Status() {
+// }
+
+// func (conn *TCPConn) Send(data []byte, size uint32) error {
+
 // }
 
 func (conn *TCPConn) Open(localIPStr string, localPort uint16, remoteIPStr string, remotePort uint16) error {
