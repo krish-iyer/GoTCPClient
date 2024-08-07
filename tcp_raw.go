@@ -357,7 +357,7 @@ func (conn *TCPConn) generateInitSeqNum() uint32 {
 }
 
 func serializeTCPPack(packet TCPPack) []byte {
-	buff := make([]byte, 20)
+	buff := make([]byte, 20+(len(packet.Data)))
 
 	binary.BigEndian.PutUint16(buff[0:2], packet.Src)
 	binary.BigEndian.PutUint16(buff[2:4], packet.Dst)
@@ -384,6 +384,9 @@ func serializeTCPPack(packet TCPPack) []byte {
 		}
 	}
 
+	if len(packet.Data) > 0 {
+		copy(buff[20:], packet.Data)
+	}
 	return buff
 }
 
