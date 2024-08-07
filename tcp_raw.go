@@ -858,7 +858,7 @@ func (conn *TCPConn) recvSegNonBloc(size int) (SegVars, error) {
 func (conn *TCPConn) validateAndUpdateVars(recv bool, seg SegVars) bool {
 	if !recv {
 		if seg.AckNum <= conn.SendVars.Next {
-			if validateFlags(seg.Flags, SYN) || validateFlags(seg.Flags, FIN) {
+			if validateFlags(seg.Flags, SYN) || validateFlags(seg.Flags, FIN) || validateFlags(seg.Flags, PSH) {
 				conn.SendVars.LastAckNum = seg.SeqNum + uint32(seg.Length) + 1
 			} else {
 				conn.SendVars.LastAckNum = seg.SeqNum + uint32(seg.Length)
