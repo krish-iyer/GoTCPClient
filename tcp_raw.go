@@ -87,6 +87,7 @@ func stateIntToStr(state uint8) string {
 
 const (
 	IPV4HDRLEN = 20
+	TCPHDRLEN  = 20
 )
 
 const (
@@ -123,7 +124,7 @@ type TCPPack struct {
 	Checksum  uint16 // Kernel will set this if it's 0
 	UrgentPtr uint16
 	Options   []TCPOption // size(Options) == (DOffset-5)*32; present only when DOffset > 5
-	Length    uint32
+	Length    uint16
 	Data      []byte
 }
 
@@ -165,6 +166,7 @@ type TCPConn struct {
 	RecvVars      RecvVars
 	State         uint8
 	CloseListenCh chan bool
+	EffSNDMSS     uint16
 }
 
 const logLevel = DEBUG
@@ -356,6 +358,9 @@ func (conn *TCPConn) generateInitSeqNum() uint32 {
 	return uint32(rand.Int31n(int32(ipSum)) + int32(time.Now().UnixMicro()%4))
 }
 
+func (conn *TCPConn) getUsableWin() uint16 {
+	return uint16(conn.SendVars.UnAck - uint32(conn.RecvVars.Window) - conn.SendVars.Next)
+}
 func serializeTCPPack(packet TCPPack) []byte {
 	buff := make([]byte, 20+(len(packet.Data)))
 
@@ -508,7 +513,7 @@ func (conn *TCPConn) sendSeg(packet TCPPack) error {
 		if (validateFlags(packet.Flags, SYN)) || (validateFlags(packet.Flags, FIN)) {
 			conn.SendVars.Next = packet.SeqNum + uint32((packet.Offset-5)<<2) + 1 // (packet.Offset - 5) + 1
 		} else if validateFlags(packet.Flags, PSH) {
-			conn.SendVars.Next = packet.SeqNum + uint32((packet.Offset-5)<<2) + packet.Length
+			conn.SendVars.Next = packet.SeqNum + uint32((packet.Offset-5)<<2) + uint32(packet.Length)
 		} else {
 			conn.SendVars.Next = packet.SeqNum
 		}
@@ -637,6 +642,7 @@ func (conn *TCPConn) recvSeg(size int) (SegVars, error) {
 					for _, option := range deserPack.Options {
 						if option.Kind == 2 {
 							conn.RecvVars.MSS = binary.BigEndian.Uint16(option.Data[0:2])
+							conn.EffSNDMSS = conn.RecvVars.MSS - IPV4HDRLEN - TCPHDRLEN // TODO: TCPHDRLEN might change
 							conn.log(DEBUG, &deserPack, "Setting MSS: %v", conn.RecvVars.MSS)
 						}
 					}
@@ -739,27 +745,33 @@ func (conn *TCPConn) recvRaw(size int) ([]byte, int, error) {
 // func (conn *TCPConn) Status() {
 // }
 
-func (conn *TCPConn) Send(data []byte, size uint32) error {
-	var packet TCPPack
+func (conn *TCPConn) Send(data []byte, size uint16) error {
+	var err, tcpErr error
 
-	packet.Src = conn.LocalPort
-	packet.Dst = conn.RemotePort
-	packet.SeqNum = conn.SendVars.Next
-	packet.AckNum = conn.SendVars.LastAckNum
-	packet.Offset = 5
-	packet.Flags = PSH | ACK
-	packet.Window = 128
-	packet.Checksum = 0
-	packet.UrgentPtr = 0
-	packet.Length = size
-	packet.Data = make([]byte, size)
-	copy(packet.Data[:size], data[:size])
+	if (size < conn.EffSNDMSS) && (size < conn.getUsableWin()) {
+		var packet TCPPack
 
-	err := conn.sendSeg(packet)
-	if err != nil {
-		fmt.Println("Error sending data", err)
+		packet.Src = conn.LocalPort
+		packet.Dst = conn.RemotePort
+		packet.SeqNum = conn.SendVars.Next
+		packet.AckNum = conn.SendVars.LastAckNum
+		packet.Offset = 5
+		packet.Flags = PSH | ACK
+		packet.Window = 128
+		packet.Checksum = 0
+		packet.UrgentPtr = 0
+		packet.Length = size
+		packet.Data = make([]byte, size)
+		copy(packet.Data[:size], data[:size])
+
+		err = conn.sendSeg(packet)
+		if err != nil {
+			tcpErr = NewTCPError(400, "Sending data failed\n%v", err)
+		}
+	} else {
+		tcpErr = NewTCPError(401, "Size of data to be send is greater than EffSNDMSS or usable Window")
 	}
-	return err
+	return tcpErr
 }
 
 func (conn *TCPConn) Open(localIPStr string, localPort uint16, remoteIPStr string, remotePort uint16) error {
@@ -896,6 +908,7 @@ func (conn *TCPConn) stateChange(state uint8) error {
 			}
 			// default for IPv4
 			conn.RecvVars.MSS = 536
+			conn.EffSNDMSS = conn.RecvVars.MSS - IPV4HDRLEN - TCPHDRLEN // TODO: TCPHDRLEN might change
 			conn.State = ESTABLISHED
 			conn.log(DEBUG, nil, "Connection is established")
 
@@ -959,13 +972,13 @@ func main() {
 	str := "Hello, World! Krishnan"
 	byteArray := []byte(str)
 
-	err = conn.Send(byteArray, uint32(len(byteArray)))
+	err = conn.Send(byteArray, uint16(len(byteArray)))
 	if err != nil {
 		tcpErr = NewTCPError(1, "Error closing connection\n%v", err)
 		fmt.Println(tcpErr)
 	}
 
-	err = conn.Send(byteArray, uint32(len(byteArray)))
+	err = conn.Send(byteArray, uint16(len(byteArray)))
 	if err != nil {
 		tcpErr = NewTCPError(1, "Error closing connection\n%v", err)
 		fmt.Println(tcpErr)
