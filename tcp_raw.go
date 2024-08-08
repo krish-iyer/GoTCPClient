@@ -970,15 +970,20 @@ func main() {
 		return
 	}
 
-	str := "Hello, World! Krishnan"
-	byteArray := []byte(str)
-
-	err = conn.Send(byteArray, uint16(len(byteArray)))
-	if err != nil {
-		tcpErr = NewTCPError(1, "Error closing connection\n%v", err)
-		fmt.Println(tcpErr)
+	byteArray := make([]byte, 64)
+	for i := range byteArray {
+		byteArray[i] = 0xff
 	}
 
+	for i := 0; i < 100; i++ {
+		err = conn.Send(byteArray, uint16(len(byteArray)))
+		if err != nil {
+			tcpErr = NewTCPError(1, "Error closing connection\n%v", err)
+			fmt.Println(tcpErr)
+			break
+		}
+		//time.Sleep(1*time.Microsecond)
+	}
 	err = conn.Send(byteArray, uint16(len(byteArray)))
 	if err != nil {
 		tcpErr = NewTCPError(1, "Error closing connection\n%v", err)
