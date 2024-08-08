@@ -484,7 +484,7 @@ func (conn *TCPConn) sendFlags(flags uint8) error {
 	packet.AckNum = conn.SendVars.LastAckNum
 	packet.Offset = 5
 	packet.Flags = flags
-	packet.Window = 128
+	packet.Window = 65535
 	packet.Checksum = 0
 	packet.UrgentPtr = 0
 	packet.Length = 0
@@ -757,7 +757,7 @@ func (conn *TCPConn) Send(data []byte, size uint16) error {
 		packet.AckNum = conn.SendVars.LastAckNum
 		packet.Offset = 5
 		packet.Flags = PSH | ACK
-		packet.Window = 128
+		packet.Window = 65535
 		packet.Checksum = 0
 		packet.UrgentPtr = 0
 		packet.Length = size
