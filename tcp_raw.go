@@ -634,6 +634,7 @@ func (conn *TCPConn) recvSeg(size int) (SegVars, error) {
 		}
 
 		if recvLen > 0 {
+			tcpErr = nil
 			deserPack := deserializeTCPPack(buff)
 			// filter
 			if (deserPack.Dst == conn.LocalPort) && (deserPack.Src == conn.RemotePort) {
@@ -660,7 +661,7 @@ func (conn *TCPConn) recvSeg(size int) (SegVars, error) {
 			}
 		} else {
 			tcpErr = NewTCPError(352, "Received empty buffer")
-			break
+			//break
 		}
 	}
 	return seg, tcpErr
