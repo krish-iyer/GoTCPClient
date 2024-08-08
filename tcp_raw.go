@@ -724,7 +724,7 @@ func (conn *TCPConn) recvRaw(size int) ([]byte, int, error) {
 	recvLen, sockAddr, err = syscall.Recvfrom(conn.Fd, buff, 0)
 	sockAddrInet4, _ := sockAddr.(*syscall.SockaddrInet4)
 	if err != nil {
-		if err == syscall.EAGAIN {
+		if err == syscall.EAGAIN || err == syscall.EINTR {
 			// Non-blocking timeout reached, loop again
 			tcpErr = NewTCPError(300, "Recv Timout\n%v", err)
 		} else {
