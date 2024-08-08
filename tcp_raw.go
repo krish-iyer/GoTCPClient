@@ -359,7 +359,7 @@ func (conn *TCPConn) generateInitSeqNum() uint32 {
 }
 
 func (conn *TCPConn) getUsableWin() uint16 {
-	return uint16(conn.SendVars.UnAck - uint32(conn.RecvVars.Window) - conn.SendVars.Next)
+	return uint16(uint32(conn.RecvVars.Window) - (conn.SendVars.Next - conn.SendVars.UnAck))
 }
 func serializeTCPPack(packet TCPPack) []byte {
 	buff := make([]byte, 20+(len(packet.Data)))
