@@ -884,7 +884,7 @@ func (conn *TCPConn) stateChange(state uint8) error {
 
 			conn.CloseListenCh = make(chan bool)
 			// setting recv timeout
-			tv := syscall.NsecToTimeval(1 * 1e6) // 1ms
+			tv := syscall.NsecToTimeval(1) // 0.1ms
 			syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
 
 			// init handshake
