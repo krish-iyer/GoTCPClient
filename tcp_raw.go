@@ -881,7 +881,7 @@ func (conn *TCPConn) stateChange(state uint8) error {
 			}
 
 			conn.Fd = fd
-
+			conn.RecvVars.MSS = 536
 			conn.CloseListenCh = make(chan bool)
 			// setting recv timeout
 			tv := syscall.NsecToTimeval(1) // 0.1ms
@@ -908,7 +908,6 @@ func (conn *TCPConn) stateChange(state uint8) error {
 				return tcpErr
 			}
 			// default for IPv4
-			conn.RecvVars.MSS = 536
 			conn.EffSNDMSS = conn.RecvVars.MSS - IPV4HDRLEN - TCPHDRLEN // TODO: TCPHDRLEN might change
 			conn.State = ESTABLISHED
 			conn.log(DEBUG, nil, "Connection is established")
