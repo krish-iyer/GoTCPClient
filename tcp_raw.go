@@ -39,6 +39,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -169,6 +170,8 @@ type TCPConn struct {
 	CloseListenCh   chan bool
 	SendPackCh      chan uint32
 	SendPackChMu    sync.Mutex
+	FastReTransCh   chan uint32
+	ReTransSeqNum   uint32
 	SendPackCount   uint16
 	EffSNDMSS       uint16
 	SendPacketQueue *Queue
@@ -270,7 +273,8 @@ func (q *Queue) Dequeue(seqNum uint32) bool {
 	deleted := false
 
 	for key := range q.items {
-		if key <= seqNum {
+		if key < seqNum {
+			fmt.Println("Deleted:", key)
 			delete(q.items, key)
 			deleted = true
 		}
@@ -423,6 +427,7 @@ func (conn *TCPConn) generateInitSeqNum() uint32 {
 func (conn *TCPConn) getUsableWin() uint16 {
 	return uint16(uint32(conn.RecvVars.Window) - (conn.SendVars.Next - conn.SendVars.UnAck))
 }
+
 func serializeTCPPack(packet TCPPack) []byte {
 	buff := make([]byte, 20+(len(packet.Data)))
 
@@ -531,11 +536,10 @@ func (conn *TCPConn) validateAndUpdateVars(recv bool, seg SegVars) bool {
 				}
 				return true
 			}
-			if conn.SendVars.UnAck == seg.AckNum {
-				conn.log(ERROR, nil, "Received a duplicate ack")
-				conn.SendPackChMu.Lock()
-				conn.SendPackCh <- seg.AckNum
-				conn.SendPackChMu.Unlock()
+			if (conn.SendVars.UnAck == seg.AckNum) && (conn.ReTransSeqNum != seg.AckNum) {
+				conn.log(ERROR, nil, "Received a duplicate ack resending the packet :ackNum:%v", seg.AckNum)
+				conn.FastReTransCh <- seg.AckNum
+				conn.ReTransSeqNum = seg.AckNum
 			}
 		}
 	}
@@ -912,6 +916,71 @@ func (conn *TCPConn) listen() {
 		case <-conn.CloseListenCh:
 			//conn.log(DEBUG, nil, "Exiting listen loop")
 			return
+		case seqNum := <-conn.FastReTransCh:
+
+			conn.SendPacketQueue.mu.RLock()
+			defer conn.SendPacketQueue.mu.RUnlock()
+
+			var keys []uint32
+			for key := range conn.SendPacketQueue.items {
+				if key >= seqNum {
+					keys = append(keys, key)
+				}
+			}
+
+			// Sort the keys in ascending order to ensure packets are sent in order
+			sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+
+			// Iterate over sorted keys and send each packet in the correct order
+
+			count := 0
+			maxPackets := 5 // Number of packets to process
+
+			for _, key := range keys {
+				if count >= maxPackets {
+					break // Exit the loop after processing three packets
+				}
+
+				ok, packet := conn.SendPacketQueue.Get(key)
+				if ok {
+					err := conn.sendSeg(packet)
+					if err != nil {
+						conn.log(ERROR, &packet, "Sending data failed\n%v", err)
+					} else {
+						conn.SendPackCount++
+					}
+				} else {
+					conn.log(ERROR, nil, "You are trying to send a packet which doesn't exist in the queue", err)
+				}
+
+				// Increment the counter after processing a packet
+				count++
+			}
+			// for _, key := range keys {
+			// 	ok, packet := conn.SendPacketQueue.Get(key)
+			// 	if ok {
+			// 		err = conn.sendSeg(packet)
+			// 		if err != nil {
+			// 			conn.log(ERROR, &packet, "Sending data failed\n%v", err)
+			// 		} else {
+			// 			conn.SendPackCount++
+			// 		}
+			// 	} else {
+			// 		conn.log(ERROR, nil, "You are trying to send a packet which doesn't exist in the queue", err)
+			// 	}
+			// }
+
+			// ok, packet := conn.SendPacketQueue.Get(seqNum)
+			// if ok {
+			// 	err = conn.sendSeg(packet)
+			// 	if err != nil {
+			// 		conn.log(ERROR, &packet, "Sending data failed\n%v", err)
+			// 	} else {
+			// 		conn.SendPackCount++
+			// 	}
+			// } else {
+			// 	conn.log(ERROR, nil, "You are trying to send an packet which doesn't exist in the queue", err)
+			// }
 		case seqNum := <-conn.SendPackCh:
 			ok, packet := conn.SendPacketQueue.Get(seqNum)
 			if ok {
@@ -925,7 +994,7 @@ func (conn *TCPConn) listen() {
 				conn.log(ERROR, nil, "You are trying to send an packet which doesn't exist in the queue", err)
 			}
 		default:
-			conn.log(DEBUG, nil, "Listen in default")
+			//conn.log(DEBUG, nil, "Listen in default")
 			isReset, _ = conn.recvAny()
 			if err != nil {
 				if tcpErr, ok := err.(*TCPError); ok {
@@ -972,8 +1041,10 @@ func (conn *TCPConn) stateChange(state uint8) error {
 			conn.RecvVars.MSS = 536
 			conn.CloseListenCh = make(chan bool)
 			conn.SendPackCh = make(chan uint32, 1000)
+			conn.FastReTransCh = make(chan uint32, 1000)
 			conn.SendPacketQueue = NewQueue()
 			conn.SendPackCount = 0
+			conn.ReTransSeqNum = 0
 			// setting recv timeout
 			tv := syscall.NsecToTimeval(1 * 1e6) // 0.1ms
 			syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
@@ -1049,10 +1120,12 @@ func (conn *TCPConn) stateChange(state uint8) error {
 	return tcpErr
 }
 
+const REMOTE_PORT = 8080
+
 func main() {
 
 	var conn TCPConn
-	err := conn.Open("10.68.186.2", 8080, "10.72.138.186", 60000)
+	err := conn.Open("10.68.186.2", 8080, "10.72.138.186", uint16(REMOTE_PORT))
 	var tcpErr error
 	if err != nil {
 		tcpErr = NewTCPError(0, "Error opening connection\n%v", err)
@@ -1060,25 +1133,42 @@ func main() {
 		return
 	}
 
-	byteArray := make([]byte, 64)
+	byteArray := make([]byte, 512)
 	for i := range byteArray {
 		byteArray[i] = 0xff
 	}
 
-	for i := 0; i < 100; i++ {
+	// for i := 0; i < 500; i++ {
+	// 	// Check if the queue length is greater than 10
+	// 	for conn.SendPacketQueue.Len() > 5 {
+	// 		// Wait before checking again
+	// 		time.Sleep(time.Millisecond * 100) // Adjust the sleep duration as needed
+	// 		continue
+	// 	}
+
+	// 	// Attempt to send data
+	// 	err := conn.Send(byteArray, uint16(len(byteArray)))
+	// 	if err != nil {
+	// 		tcpErr := NewTCPError(1, "Error sending data\n%v", err)
+	// 		fmt.Println(tcpErr)
+	// 		break
+	// 	}
+	// }
+	for i := 0; i < 1000; i++ {
 		err = conn.Send(byteArray, uint16(len(byteArray)))
 		if err != nil {
 			tcpErr = NewTCPError(1, "Error closing connection\n%v", err)
 			fmt.Println(tcpErr)
 			break
 		}
+		time.Sleep(100 * time.Millisecond)
 	}
 
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		if conn.SendPacketQueue.Len() == 0 {
+		if conn.SendPacketQueue.Len() <= 1 {
 			err = conn.Close()
 			if err != nil {
 				tcpErr = NewTCPError(2, "Error closing connection\n%v", err)
