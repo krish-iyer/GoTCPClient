@@ -662,7 +662,7 @@ func (conn *TCPConn) recvAny() (bool, error) {
 	var err, tcpErr error
 	var seg SegVars
 	isReset := false
-	seg, err = conn.recvSegNonBloc(1024)
+	seg, err = conn.recvSeg(1024)
 
 	if err != nil {
 		if tcpErr, ok := err.(*TCPError); ok {
@@ -989,26 +989,18 @@ func (conn *TCPConn) listen() {
 					conn.log(ERROR, &packet, "Sending data failed\n%v", err)
 				} else {
 					conn.SendPackCount++
+					isReset, _ = conn.recvAny()
+					if isReset {
+						conn.log(DEBUG, nil, "Reset received from remote connection")
+						return
+					}
 				}
 			} else {
 				conn.log(ERROR, nil, "You are trying to send an packet which doesn't exist in the queue", err)
 			}
-		default:
+			//default:
 			//conn.log(DEBUG, nil, "Listen in default")
-			isReset, _ = conn.recvAny()
-			if err != nil {
-				if tcpErr, ok := err.(*TCPError); ok {
-					if tcpErr.Code == 300 {
-						continue
-					}
-				}
-				conn.log(ERROR, nil, "Error in recv ACK in listen loop\n%v", err)
-				return
-			}
-			if isReset {
-				conn.log(DEBUG, nil, "Reset received from remote connection")
-				return
-			}
+
 		}
 	}
 }
@@ -1040,7 +1032,7 @@ func (conn *TCPConn) stateChange(state uint8) error {
 			conn.Fd = fd
 			conn.RecvVars.MSS = 536
 			conn.CloseListenCh = make(chan bool)
-			conn.SendPackCh = make(chan uint32, 1000)
+			conn.SendPackCh = make(chan uint32)
 			conn.FastReTransCh = make(chan uint32, 1000)
 			conn.SendPacketQueue = NewQueue()
 			conn.SendPackCount = 0
@@ -1161,7 +1153,7 @@ func main() {
 			fmt.Println(tcpErr)
 			break
 		}
-		time.Sleep(100 * time.Millisecond)
+		//time.Sleep(100 * time.Millisecond)
 	}
 
 	ticker := time.NewTicker(5 * time.Second)
