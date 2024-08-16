@@ -168,7 +168,7 @@ type TCPConn struct {
 	RecvVars        RecvVars
 	State           uint8
 	CloseListenCh   chan bool
-	SendPackCh      chan uint32
+	SendPackCh      chan TCPPack
 	SendPackChMu    sync.Mutex
 	FastReTransCh   chan uint32
 	ReTransSeqNum   uint32
@@ -397,13 +397,19 @@ func validateAddrFormat(localIPStr string, remoteIPStr string) ([4]byte, [4]byte
 
 func checksum(data []byte) uint16 {
 	sum := uint32(0)
+
 	for i := 0; i < len(data)-1; i += 2 {
 		sum += uint32(data[i])<<8 | uint32(data[i+1])
 	}
+
 	if len(data)%2 == 1 {
 		sum += uint32(data[len(data)-1]) << 8
 	}
-	sum = (sum >> 16) + (sum & 0xFFFF)
+
+	for (sum >> 16) > 0 {
+		sum = (sum >> 16) + (sum & 0xFFFF)
+	}
+
 	return uint16(^sum)
 }
 
@@ -530,17 +536,19 @@ func (conn *TCPConn) validateAndUpdateVars(recv bool, seg SegVars) bool {
 				conn.log(DEBUG, nil, "Updating ->UnACK: %v AckNum: %v Next: %v, Flags: %v", conn.SendVars.UnAck, seg.AckNum, conn.SendVars.Next, seg.Flags)
 				conn.SendVars.UnAck = seg.AckNum
 				conn.RecvVars.Window = seg.Window
-				ok := conn.SendPacketQueue.Dequeue(seg.AckNum - 64)
+				ok := conn.SendPacketQueue.Dequeue(seg.AckNum - 1024)
 				if !ok {
 					conn.log(ERROR, nil, "Dequeue failed ackNum : %v", seg.AckNum)
 				}
 				return true
 			}
-			if (conn.SendVars.UnAck == seg.AckNum) && (conn.ReTransSeqNum != seg.AckNum) {
+			if conn.SendVars.UnAck == seg.AckNum { //&& (conn.ReTransSeqNum != seg.AckNum) {
 				conn.log(ERROR, nil, "Received a duplicate ack resending the packet :ackNum:%v", seg.AckNum)
 				//conn.FastReTransCh <- seg.AckNum
 				conn.ReTransSeqNum = seg.AckNum
 			}
+		} else {
+			conn.log(DEBUG, nil, "AckNum: %v is not less than Next %v", seg.AckNum, conn.SendVars.Next)
 		}
 	}
 	return false
@@ -829,7 +837,9 @@ func (conn *TCPConn) Send(data []byte, size uint16) error {
 
 		packet.Src = conn.LocalPort
 		packet.Dst = conn.RemotePort
-		packet.SeqNum = conn.SendVars.Next
+		//conn.SendPackChMu.Lock()
+		//packet.SeqNum = conn.SendVars.Next
+		//conn.SendPackChMu.Unlock()
 		packet.AckNum = conn.SendVars.LastAckNum
 		packet.Offset = 5
 		packet.Flags = PSH | ACK
@@ -839,12 +849,12 @@ func (conn *TCPConn) Send(data []byte, size uint16) error {
 		packet.Length = size
 		packet.Data = make([]byte, size)
 		copy(packet.Data[:size], data[:size])
+		//conn.SendPacketQueue.Enqueue(packet.SeqNum, packet)
+		//conn.SendPackChMu.Lock()
+		conn.SendPackCh <- packet
+		//conn.SendPackChMu.Unlock()
 
-		conn.SendPacketQueue.Enqueue(packet.SeqNum, packet)
-		conn.SendPackChMu.Lock()
-		conn.SendPackCh <- packet.SeqNum
-		conn.SendPackChMu.Unlock()
-		conn.SendVars.Next = packet.SeqNum + uint32((packet.Offset-5)<<2) + uint32(packet.Length)
+		conn.log(DEBUG, nil, "Next is updated:%v", conn.SendVars.Next)
 		// err = conn.sendSeg(packet)
 		// if err != nil {
 		// 	tcpErr = NewTCPError(400, "Sending data failed\n%v", err)
@@ -981,54 +991,64 @@ func (conn *TCPConn) listen() {
 			// } else {
 			// 	conn.log(ERROR, nil, "You are trying to send an packet which doesn't exist in the queue", err)
 			// }
-		case seqNum := <-conn.SendPackCh:
-			ok, packet := conn.SendPacketQueue.Get(seqNum)
-			if ok {
-				err = conn.sendSeg(packet)
-				if err != nil {
-					conn.log(ERROR, &packet, "Sending data failed\n%v", err)
-				} else {
-					conn.SendPackCount++
-					recvTO := time.NewTicker(10 * time.Second)
-					maxReTrans := 50
-					reTransCount := 0
-				breakRecvLoop:
-					for {
-						select {
-						case <-recvTO.C:
-							if reTransCount < maxReTrans {
-								err = conn.sendSeg(packet)
-								if err != nil {
-									conn.log(ERROR, &packet, "Sending data failed\n%v", err)
-								} else {
-									reTransCount++
-								}
-							} else {
-								break breakRecvLoop
-							}
-						default:
-							isReset, err = conn.recvAny()
+		case packet := <-conn.SendPackCh:
+			//ok, packet := conn.SendPacketQueue.Get(seqNum)
+			//if ok {
+			packet.SeqNum = conn.SendVars.Next
+			err = conn.sendSeg(packet)
+			if err != nil {
+				conn.log(ERROR, &packet, "Sending data failed\n%v", err)
+			} else {
+				conn.SendPackChMu.Lock()
+				conn.SendVars.Next = packet.SeqNum + uint32((packet.Offset-5)<<2) + uint32(packet.Length)
+				conn.SendPackChMu.Unlock()
+				conn.log(DEBUG, nil, "Channle: Updating Next, %v", conn.SendVars.Next)
+				conn.SendPackCount++
+				recvTO := time.NewTicker(1 * time.Second)
+				maxReTrans := 10
+				reTransCount := 0
+			breakRecvLoop:
+				for {
+					select {
+					case <-recvTO.C:
+						if reTransCount < maxReTrans {
+							conn.log(ERROR, nil, "Retransmitting%v\n", packet.SeqNum)
+							err = conn.sendSeg(packet)
 							if err != nil {
-								//if tcpErr, ok := err.(*TCPError); ok {
-								//if tcpErr.Code == 300 {
-								continue
-								//}
-								//}
-								//conn.log(ERROR, nil, "Error receiving segment\n%v", err)
-								//break breakRecvLoop
+								conn.log(ERROR, &packet, "Sending data failed\n%v", err)
+							} else {
+								reTransCount++
 							}
-
-							if isReset {
-								conn.log(DEBUG, nil, "Reset received from remote connection")
-								return
-							}
+						} else {
+							recvTO.Stop()
 							break breakRecvLoop
 						}
+					default:
+						isReset, err = conn.recvAny()
+						if err != nil {
+							//if tcpErr, ok := err.(*TCPError); ok {
+							//if tcpErr.Code == 300 {
+							//conn.log(ERROR, nil, "Error receiving segment\n%v", err)
+							continue
+							//}
+							//}
+
+							//break breakRecvLoop
+						}
+
+						if isReset {
+							conn.log(DEBUG, nil, "Reset received from remote connection")
+							return
+						}
+						recvTO.Stop()
+						//conn.log(DEBUG, nil, "received ACK, not breaking recvLOOP")
+						break breakRecvLoop
 					}
 				}
-			} else {
-				conn.log(ERROR, nil, "You are trying to send an packet which doesn't exist in the queue", err)
 			}
+			//} //else {
+			//	conn.log(ERROR, nil, "You are trying to send an packet which doesn't exist in the queue", err)
+			//}
 			//default:
 			//conn.log(DEBUG, nil, "Listen in default")
 
@@ -1063,13 +1083,13 @@ func (conn *TCPConn) stateChange(state uint8) error {
 			conn.Fd = fd
 			conn.RecvVars.MSS = 536
 			conn.CloseListenCh = make(chan bool)
-			conn.SendPackCh = make(chan uint32)
+			conn.SendPackCh = make(chan TCPPack)
 			conn.FastReTransCh = make(chan uint32, 1000)
 			conn.SendPacketQueue = NewQueue()
 			conn.SendPackCount = 0
 			conn.ReTransSeqNum = 0
 			// setting recv timeout
-			tv := syscall.NsecToTimeval(1 * 1e6) // 0.1ms
+			tv := syscall.NsecToTimeval(1) // 0.1ms
 			syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
 
 			// init handshake
@@ -1143,7 +1163,7 @@ func (conn *TCPConn) stateChange(state uint8) error {
 	return tcpErr
 }
 
-const REMOTE_PORT = 9001
+const REMOTE_PORT = 3000
 
 func main() {
 
@@ -1156,7 +1176,7 @@ func main() {
 		return
 	}
 
-	byteArray := make([]byte, 512)
+	byteArray := make([]byte, 1024)
 	for i := range byteArray {
 		byteArray[i] = 0xff
 	}
@@ -1177,29 +1197,31 @@ func main() {
 	// 		break
 	// 	}
 	// }
-	for i := 0; i < 1000; i++ {
+	for i := 0; i < 10000; i++ {
 		err = conn.Send(byteArray, uint16(len(byteArray)))
 		if err != nil {
 			tcpErr = NewTCPError(1, "Error closing connection\n%v", err)
 			fmt.Println(tcpErr)
 			break
 		}
-		//time.Sleep(20 * time.Millisecond)
+		//time.Sleep(100 * time.Millisecond)
 	}
 
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
+	conn.Close()
 
-	for range ticker.C {
-		if conn.SendPacketQueue.Len() <= 1 {
-			err = conn.Close()
-			if err != nil {
-				tcpErr = NewTCPError(2, "Error closing connection\n%v", err)
-				fmt.Println(tcpErr)
-			}
-			break
-		} else {
-			fmt.Println("Queue length :", conn.SendPacketQueue.Len())
-		}
-	}
+	// ticker := time.NewTicker(5 * time.Second)
+	// defer ticker.Stop()
+
+	// for range ticker.C {
+	// 	if conn.SendPacketQueue.Len() <= 1 {
+	// 		err = conn.Close()
+	// 		if err != nil {
+	// 			tcpErr = NewTCPError(2, "Error closing connection\n%v", err)
+	// 			fmt.Println(tcpErr)
+	// 		}
+	// 		break
+	// 	} else {
+	// 		fmt.Println("Queue length :", conn.SendPacketQueue.Len())
+	// 	}
+	// }
 }
