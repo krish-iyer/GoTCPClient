@@ -538,7 +538,7 @@ func (conn *TCPConn) validateAndUpdateVars(recv bool, seg SegVars) bool {
 			}
 			if (conn.SendVars.UnAck == seg.AckNum) && (conn.ReTransSeqNum != seg.AckNum) {
 				conn.log(ERROR, nil, "Received a duplicate ack resending the packet :ackNum:%v", seg.AckNum)
-				conn.FastReTransCh <- seg.AckNum
+				//conn.FastReTransCh <- seg.AckNum
 				conn.ReTransSeqNum = seg.AckNum
 			}
 		}
@@ -662,7 +662,7 @@ func (conn *TCPConn) recvAny() (bool, error) {
 	var err, tcpErr error
 	var seg SegVars
 	isReset := false
-	seg, err = conn.recvSeg(1024)
+	seg, err = conn.recvSegNonBloc(1024)
 
 	if err != nil {
 		if tcpErr, ok := err.(*TCPError); ok {
@@ -989,10 +989,41 @@ func (conn *TCPConn) listen() {
 					conn.log(ERROR, &packet, "Sending data failed\n%v", err)
 				} else {
 					conn.SendPackCount++
-					isReset, _ = conn.recvAny()
-					if isReset {
-						conn.log(DEBUG, nil, "Reset received from remote connection")
-						return
+					recvTO := time.NewTicker(10 * time.Second)
+					maxReTrans := 50
+					reTransCount := 0
+				breakRecvLoop:
+					for {
+						select {
+						case <-recvTO.C:
+							if reTransCount < maxReTrans {
+								err = conn.sendSeg(packet)
+								if err != nil {
+									conn.log(ERROR, &packet, "Sending data failed\n%v", err)
+								} else {
+									reTransCount++
+								}
+							} else {
+								break breakRecvLoop
+							}
+						default:
+							isReset, err = conn.recvAny()
+							if err != nil {
+								//if tcpErr, ok := err.(*TCPError); ok {
+								//if tcpErr.Code == 300 {
+								continue
+								//}
+								//}
+								//conn.log(ERROR, nil, "Error receiving segment\n%v", err)
+								//break breakRecvLoop
+							}
+
+							if isReset {
+								conn.log(DEBUG, nil, "Reset received from remote connection")
+								return
+							}
+							break breakRecvLoop
+						}
 					}
 				}
 			} else {
@@ -1112,7 +1143,7 @@ func (conn *TCPConn) stateChange(state uint8) error {
 	return tcpErr
 }
 
-const REMOTE_PORT = 8080
+const REMOTE_PORT = 9001
 
 func main() {
 
@@ -1153,7 +1184,7 @@ func main() {
 			fmt.Println(tcpErr)
 			break
 		}
-		//time.Sleep(100 * time.Millisecond)
+		//time.Sleep(20 * time.Millisecond)
 	}
 
 	ticker := time.NewTicker(5 * time.Second)
@@ -1168,7 +1199,7 @@ func main() {
 			}
 			break
 		} else {
-			fmt.Println("Queue length :", conn.SendPacketQueue.Len(), conn.SendPacketQueue.GetMap())
+			fmt.Println("Queue length :", conn.SendPacketQueue.Len())
 		}
 	}
 }
