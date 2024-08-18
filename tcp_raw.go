@@ -599,6 +599,8 @@ func (conn *TCPConn) sendSeg(packet TCPPack) error {
 			conn.SendVars.Next = packet.SeqNum + uint32((packet.Offset-5)<<2) + 1 // (packet.Offset - 5) + 1
 		} else if !validateFlags(packet.Flags, PSH) {
 			conn.SendVars.Next = packet.SeqNum
+		} else if validateFlags(packet.Flags, PSH) {
+			conn.SendVars.Next = packet.SeqNum + uint32((packet.Offset-5)<<2) + uint32(packet.Length)
 		}
 	}
 	return err
@@ -835,30 +837,12 @@ func (conn *TCPConn) Send(data []byte, size uint16) error {
 	if (size < conn.EffSNDMSS) && (size < conn.getUsableWin()) {
 		var packet TCPPack
 
-		packet.Src = conn.LocalPort
-		packet.Dst = conn.RemotePort
-		//conn.SendPackChMu.Lock()
-		//packet.SeqNum = conn.SendVars.Next
-		//conn.SendPackChMu.Unlock()
-		packet.AckNum = conn.SendVars.LastAckNum
-		packet.Offset = 5
-		packet.Flags = PSH | ACK
-		packet.Window = 65535
-		packet.Checksum = 0
-		packet.UrgentPtr = 0
 		packet.Length = size
 		packet.Data = make([]byte, size)
 		copy(packet.Data[:size], data[:size])
-		//conn.SendPacketQueue.Enqueue(packet.SeqNum, packet)
-		//conn.SendPackChMu.Lock()
 		conn.SendPackCh <- packet
-		//conn.SendPackChMu.Unlock()
-
 		conn.log(DEBUG, nil, "Next is updated:%v", conn.SendVars.Next)
-		// err = conn.sendSeg(packet)
-		// if err != nil {
-		// 	tcpErr = NewTCPError(400, "Sending data failed\n%v", err)
-		// }
+
 	} else {
 		tcpErr = NewTCPError(401, "Size of data to be send is greater than EffSNDMSS or usable Window")
 	}
@@ -992,17 +976,21 @@ func (conn *TCPConn) listen() {
 			// 	conn.log(ERROR, nil, "You are trying to send an packet which doesn't exist in the queue", err)
 			// }
 		case packet := <-conn.SendPackCh:
-			//ok, packet := conn.SendPacketQueue.Get(seqNum)
-			//if ok {
+
 			packet.SeqNum = conn.SendVars.Next
+			packet.Src = conn.LocalPort
+			packet.Dst = conn.RemotePort
+			packet.AckNum = conn.SendVars.LastAckNum
+			packet.Offset = 5
+			packet.Flags = PSH | ACK
+			packet.Window = 65535
+			packet.Checksum = 0
+			packet.UrgentPtr = 0
 			err = conn.sendSeg(packet)
 			if err != nil {
 				conn.log(ERROR, &packet, "Sending data failed\n%v", err)
 			} else {
-				conn.SendPackChMu.Lock()
-				conn.SendVars.Next = packet.SeqNum + uint32((packet.Offset-5)<<2) + uint32(packet.Length)
-				conn.SendPackChMu.Unlock()
-				conn.log(DEBUG, nil, "Channle: Updating Next, %v", conn.SendVars.Next)
+				conn.log(DEBUG, nil, "Channel: Updating Next, %v", conn.SendVars.Next)
 				conn.SendPackCount++
 				recvTO := time.NewTicker(1 * time.Second)
 				maxReTrans := 10
