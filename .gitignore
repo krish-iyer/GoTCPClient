@@ -1,2 +1,4 @@
 *
 !*.go
+!scripts/
+!scripts/run_client.sh
