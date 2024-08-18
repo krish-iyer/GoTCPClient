@@ -39,7 +39,9 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"os"
 	"sort"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -994,23 +996,64 @@ func (conn *TCPConn) listen() {
 				conn.log(DEBUG, nil, "Channel: Updating Next, %v", conn.SendVars.Next)
 				conn.SendPacketQueue.Enqueue(packet)
 				conn.SendPackCount++
+				recvTO := time.NewTicker(1 * time.Second)
+				maxReTrans := 10
+				reTransCount := 0
+			breakRecvLoop:
+				for {
+					select {
+					case <-recvTO.C:
+						if reTransCount < maxReTrans {
+							conn.log(ERROR, nil, "Retransmitting%v\n", packet.SeqNum)
+							err = conn.sendSeg(packet)
+							if err != nil {
+								conn.log(ERROR, &packet, "Sending data failed\n%v", err)
+							} else {
+								reTransCount++
+							}
+						} else {
+							recvTO.Stop()
+							break breakRecvLoop
+						}
+					default:
+						isReset, err = conn.recvAny()
+						if err != nil {
+							//if tcpErr, ok := err.(*TCPError); ok {
+							//if tcpErr.Code == 300 {
+							//conn.log(ERROR, nil, "Error receiving segment\n%v", err)
+							continue
+							//}
+							//}
+
+							//break breakRecvLoop
+						}
+
+						if isReset {
+							conn.log(DEBUG, nil, "Reset received from remote connection")
+							return
+						}
+						recvTO.Stop()
+						//conn.log(DEBUG, nil, "received ACK, not breaking recvLOOP")
+						break breakRecvLoop
+					}
+				}
 			}
 
-		default:
-			isReset, err = conn.recvAny()
-			if err != nil {
-				//if tcpErr, ok := err.(*TCPError); ok {
-				//if tcpErr.Code == 300 {
-				//conn.log(ERROR, nil, "Error receiving segment\n%v", err)
-				continue
-				//}
-				//}
-			}
+			// default:
+			// 	isReset, err = conn.recvAny()
+			// 	if err != nil {
+			// 		//if tcpErr, ok := err.(*TCPError); ok {
+			// 		//if tcpErr.Code == 300 {
+			// 		//conn.log(ERROR, nil, "Error receiving segment\n%v", err)
+			// 		continue
+			// 		//}
+			// 		//}
+			// 	}
 
-			if isReset {
-				conn.log(DEBUG, nil, "Reset received from remote connection")
-				return
-			}
+			// 	if isReset {
+			// 		conn.log(DEBUG, nil, "Reset received from remote connection")
+			// 		return
+			// 	}
 		}
 	}
 }
@@ -1122,12 +1165,25 @@ func (conn *TCPConn) stateChange(state uint8) error {
 	return tcpErr
 }
 
-const REMOTE_PORT = 3000
-
 func main() {
 
 	var conn TCPConn
-	err := conn.Open("10.68.186.2", 8080, "10.72.138.186", uint16(REMOTE_PORT))
+	var localIP, remoteIP string
+	var localPort, remotePort int
+
+	args := os.Args
+
+	if len(args) != 5 {
+		fmt.Println("Usage: program [LOCAL_IP] [LOCAL_PORT] [REMOTE_IP] [REMOTE_PORT]")
+		return
+	}
+
+	localIP = args[1]
+	remoteIP = args[3]
+	localPort, _ = strconv.Atoi(args[2])
+	remotePort, _ = strconv.Atoi(args[4])
+
+	err := conn.Open(localIP, uint16(localPort), remoteIP, uint16(remotePort))
 	var tcpErr error
 	if err != nil {
 		tcpErr = NewTCPError(0, "Error opening connection\n%v", err)
