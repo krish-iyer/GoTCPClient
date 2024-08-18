@@ -992,55 +992,25 @@ func (conn *TCPConn) listen() {
 				conn.log(ERROR, &packet, "Sending data failed\n%v", err)
 			} else {
 				conn.log(DEBUG, nil, "Channel: Updating Next, %v", conn.SendVars.Next)
+				conn.SendPacketQueue.Enqueue(packet)
 				conn.SendPackCount++
-				recvTO := time.NewTicker(1 * time.Second)
-				maxReTrans := 10
-				reTransCount := 0
-			breakRecvLoop:
-				for {
-					select {
-					case <-recvTO.C:
-						if reTransCount < maxReTrans {
-							conn.log(ERROR, nil, "Retransmitting%v\n", packet.SeqNum)
-							err = conn.sendSeg(packet)
-							if err != nil {
-								conn.log(ERROR, &packet, "Sending data failed\n%v", err)
-							} else {
-								reTransCount++
-							}
-						} else {
-							recvTO.Stop()
-							break breakRecvLoop
-						}
-					default:
-						isReset, err = conn.recvAny()
-						if err != nil {
-							//if tcpErr, ok := err.(*TCPError); ok {
-							//if tcpErr.Code == 300 {
-							//conn.log(ERROR, nil, "Error receiving segment\n%v", err)
-							continue
-							//}
-							//}
-
-							//break breakRecvLoop
-						}
-
-						if isReset {
-							conn.log(DEBUG, nil, "Reset received from remote connection")
-							return
-						}
-						recvTO.Stop()
-						//conn.log(DEBUG, nil, "received ACK, not breaking recvLOOP")
-						break breakRecvLoop
-					}
-				}
 			}
-			//} //else {
-			//	conn.log(ERROR, nil, "You are trying to send an packet which doesn't exist in the queue", err)
-			//}
-			//default:
-			//conn.log(DEBUG, nil, "Listen in default")
 
+		default:
+			isReset, err = conn.recvAny()
+			if err != nil {
+				//if tcpErr, ok := err.(*TCPError); ok {
+				//if tcpErr.Code == 300 {
+				//conn.log(ERROR, nil, "Error receiving segment\n%v", err)
+				continue
+				//}
+				//}
+			}
+
+			if isReset {
+				conn.log(DEBUG, nil, "Reset received from remote connection")
+				return
+			}
 		}
 	}
 }
