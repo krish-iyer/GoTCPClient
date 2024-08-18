@@ -175,6 +175,7 @@ type TCPConn struct {
 	SendPackCount   uint16
 	EffSNDMSS       uint16
 	SendPacketQueue *Queue
+	RTOTimer        *time.Ticker
 }
 
 const logLevel = DEBUG
@@ -258,10 +259,10 @@ func NewQueue() *Queue {
 }
 
 // Enqueue adds an element to the queue.
-func (q *Queue) Enqueue(seqNum uint32, packet TCPPack) {
+func (q *Queue) Enqueue(packet TCPPack) {
 	q.mu.Lock()
-	fmt.Println("Enqueuing key:", seqNum)
-	q.items[seqNum] = packet
+	fmt.Println("Enqueuing key:", packet.SeqNum)
+	q.items[packet.SeqNum] = packet
 	q.mu.Unlock()
 }
 
@@ -536,17 +537,17 @@ func (conn *TCPConn) validateAndUpdateVars(recv bool, seg SegVars) bool {
 				conn.log(DEBUG, nil, "Updating ->UnACK: %v AckNum: %v Next: %v, Flags: %v", conn.SendVars.UnAck, seg.AckNum, conn.SendVars.Next, seg.Flags)
 				conn.SendVars.UnAck = seg.AckNum
 				conn.RecvVars.Window = seg.Window
-				ok := conn.SendPacketQueue.Dequeue(seg.AckNum - 1024)
+				ok := conn.SendPacketQueue.Dequeue(seg.AckNum)
 				if !ok {
 					conn.log(ERROR, nil, "Dequeue failed ackNum : %v", seg.AckNum)
 				}
 				return true
 			}
-			if conn.SendVars.UnAck == seg.AckNum { //&& (conn.ReTransSeqNum != seg.AckNum) {
-				conn.log(ERROR, nil, "Received a duplicate ack resending the packet :ackNum:%v", seg.AckNum)
-				//conn.FastReTransCh <- seg.AckNum
-				conn.ReTransSeqNum = seg.AckNum
-			}
+			// if conn.SendVars.UnAck == seg.AckNum { //&& (conn.ReTransSeqNum != seg.AckNum) {
+			// 	conn.log(ERROR, nil, "Received a duplicate ack resending the packet :ackNum:%v", seg.AckNum)
+			// 	//conn.FastReTransCh <- seg.AckNum
+			// 	conn.ReTransSeqNum = seg.AckNum
+			// }
 		} else {
 			conn.log(DEBUG, nil, "AckNum: %v is not less than Next %v", seg.AckNum, conn.SendVars.Next)
 		}
